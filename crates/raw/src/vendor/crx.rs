@@ -332,12 +332,19 @@ fn band_bytes<'a>(sample: &'a [u8], band: &Band) -> Result<&'a [u8]> {
     sample.get(band.data.start..end).ok_or_else(|| corrupt("band data outside sample"))
 }
 
+/// Verification-only hook (throwaway branch): every decoded QP map as (width, height, values).
+pub static QP_LOG: std::sync::Mutex<Vec<(usize, usize, Vec<i32>)>> = std::sync::Mutex::new(Vec::new());
+
 fn tile_qp(sample: &[u8], tile: &Tile) -> Result<Option<QpMap>> {
     tile.qp
         .as_ref()
         .map(|range| {
             let bytes = sample.get(range.clone()).ok_or_else(|| corrupt("QP map outside sample"))?;
-            qp_map(bytes, tile.width.div_ceil(16), tile.height.div_ceil(4))
+            let map = qp_map(bytes, tile.width.div_ceil(16), tile.height.div_ceil(4))?;
+            if let Ok(mut log) = QP_LOG.lock() {
+                log.push((map.width, map.height, map.data.clone()));
+            }
+            Ok(map)
         })
         .transpose()
 }

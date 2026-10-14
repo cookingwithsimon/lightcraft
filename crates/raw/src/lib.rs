@@ -48,6 +48,8 @@ mod tiffraw;
 mod unpack;
 mod vendor;
 
+#[doc(hidden)]
+pub use vendor::crx::QP_LOG;
 pub use demosaic::{Method, demosaic};
 pub use dngwrite::{DngCompression, DngWriteOptions, write_dng, write_rendered_dng};
 pub use lightcraft_color::Mat3;
