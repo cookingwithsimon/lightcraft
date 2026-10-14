@@ -93,7 +93,23 @@ The version `0x200` QP predictor and entropy framing were checked independently.
 Controlled input mutations establish floor averaging of paired QP rows before
 the nonlinear integer table, then multiplication, division by eight, addition
 of the subband base and a minimum step of one. QP values 131–167 are verified;
-unmeasured values are rejected.
+168–175 continue the same integer sequence (below); higher values are rejected.
+
+EOS R6 Mark II C-RAW maps reach QP 172 and 175, which the decoder used to reject ("Canon CRX adaptive QP
+value 172"; the file opened as its preview). Quantization values 45–51 (QP 169–175) give steps 114, 128,
+144, 160, 180, 204 and 228, continuing the 2^(1/6) ladder of the measured values. No external decoder was
+run; the check is black-box against the camera, on a user's private files:
+
+- 144 C-RAW files (EOS R6 Mark II and R7): every file that decoded before decodes to an identical sensor
+  hash; the 3 that failed (QP maps 168–175) now decode, and their green mosaic follows the camera's
+  embedded JPEG at Pearson r 0.980–0.984 (24 × 16 cells, as in the corpus test), within the set's range;
+- per QP value, the ratio of fine detail in the decode to fine detail in the camera JPEG over the same
+  16 × 4-pixel QP cells (pooled over the files) is 6.2 at QP 172 and 12.2 at QP 175, inside the
+  2.8–15.5 spread of the already-accepted QPs 150–165; a wrong step at those QPs would show as a jump;
+- 100 % crops round the highest-QP cells of six files show no blocking, banding, ringing or seams, and
+  no change in noise between high-QP areas and their surroundings;
+- 1,492 files sampled from a 35,796-file library (1,094 R7, 298 R6 Mark II, 100 R100) decode with no
+  errors; the highest QP is 175 (3 of the 298 R6 Mark II files go above 167; the R7 stays at or below 164).
 
 The QP map is coded as follows (established on the EOS R5 Mark II). Its first symbol is a 32-bit
 big-endian literal, mapped like every other symbol and added to a prediction of zero. Every later

@@ -2,6 +2,11 @@
 
 ## 2026-10-14
 
+### More Canon EOS R6 Mark II C-RAW files decode
+- Some EOS R6 Mark II C-RAW files (about 1 in 50 in one photographer's library) opened as their preview with
+  "Canon CRX adaptive QP value 172" or "175". They now decode from the sensor data. Photos imported before this
+  switch over with Photo ▸ Reload from Disk.
+
 ### Hard-edged Heal and Clone spots
 - A spot with Feather at 0 no longer draws black pixels exactly on its radius. This also fixes spots at 0% Opacity
   changing pixels along their edge. The hard edge now leaves pixels on the radius unchanged.
