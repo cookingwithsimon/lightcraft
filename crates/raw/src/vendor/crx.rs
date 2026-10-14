@@ -30,6 +30,9 @@ const MAX_CRX_SAMPLES: usize = 200_000_000;
 const MAX_CRX_EDGE: u32 = 65_536;
 /// Unary QP-map prefix length that announces an 8-bit escaped symbol.
 const QP_ESCAPE_ZEROS: u32 = 23;
+/// PROVISIONAL
+const MAX_QUANT: u8 = 59;
+const MAX_QP: i32 = 124 + MAX_QUANT as i32;
 const RUN_EXPONENT: [u8; 32] = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 fn corrupt(reason: &str) -> RawError {
@@ -354,7 +357,7 @@ fn quant_step(value: u8) -> Result<i32> {
     // quantValue field: all forty values 4..43 follow this integer sequence. Value 44 (QP 168)
     // continues it (step 102); it was checked against a measured step of about 100 on an EOS R50
     // C-RAW file. Nothing above 44 has been seen, so it stays rejected.
-    if !(4..=44).contains(&value) {
+    if !(4..=MAX_QUANT).contains(&value) {
         return Err(RawError::Unsupported(format!("Canon CRX quantization value {value}")));
     }
     let scale = [40i32, 45, 51, 57, 64, 72].get(usize::from(value % 6)).copied().ok_or_else(|| corrupt("quantization table index"))?;
@@ -782,7 +785,7 @@ fn qp_map(src: &[u8], width: usize, height: usize) -> Result<QpMap> {
             // The map opens with its first symbol as a 32-bit literal; every later one is Rice coded.
             let symbol = if x == 0 && y == 0 { (bits.take(16)? << 16) | bits.take(16)? } else { bits.qp_rice(k)? };
             let value = median(left, above, corner).checked_add(signed(symbol)).ok_or_else(|| corrupt("QP prediction overflow"))?;
-            if !(131..=168).contains(&value) {
+            if !(131..=MAX_QP).contains(&value) {
                 return Err(RawError::Unsupported(format!("Canon CRX adaptive QP value {value}")));
             }
             *current.get_mut(x).ok_or_else(|| corrupt("QP outside row"))? = value;
