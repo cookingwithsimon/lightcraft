@@ -182,7 +182,7 @@ mask: `CorrectionName` → name, `CorrectionAmount` → Amount, inactive correct
 | `LocalContrast2012`, `LocalHighlights2012`, `LocalShadows2012`, `LocalWhites2012`, `LocalBlacks2012`, `LocalClarity2012`, `LocalTexture`, `LocalDehaze`, `LocalTemperature`, `LocalTint`, `LocalSaturation`, `LocalHue`, `LocalSharpness`, `LocalLuminanceNoise`, `LocalMoire`, `LocalDefringe`, `LocalToningSaturation` | the matching `adjust.*` | stored −1..1, ×100 |
 | `LocalToningHue` | `adjust.color_hue` | degrees |
 | `Mask/Gradient` (`FullX/Y`, `ZeroX/Y`) | linear gradient | full effect at the Full point |
-| `Mask/CircularGradient` (`Top/Left/Bottom/Right`, `Angle`, `Feather`, `Flipped`) | radial gradient | box fractions → long-edge radii (presets assume 3:2; sidecars use the photo's shape); `Flipped` → invert |
+| `Mask/CircularGradient` (`Top/Left/Bottom/Right`, `Angle`, `Feather`, `Flipped`) | radial gradient | box fractions → long-edge radii (presets assume 3:2; sidecars use the photo's shape). `Flipped="true"` means effect inside: in `MaskGroupBasedCorrections` with `Version` 2 (what Lightroom writes for an ordinary radial) and in the legacy `CircularGradientBasedCorrections` Radial Filter, whose default (no `Flipped`) is outside. A `MaskGroupBasedCorrections` radial without `Version` is inside whatever `Flipped` says, and its `Feather` is halved (Lightroom rescales it that way when it upgrades one). Inverting is `MaskInverted` |
 | `Mask/Paint` (`Dabs` "d x y", `Radius`, `Flow`, `CenterWeight`, `MaskValue`) | brush | one brush component per correction; `MaskValue` ≤ 0 erases |
 | `Mask/Image` `MaskSubType` 1 / 2 | Subject / Sky | other AI selections are reported, not guessed |
 | `Mask/RangeMask` `Type` 2 / 3 (`LumRange`, `DepthRange`) | luminance / depth range | lightness converted to our range scale; colour ranges are reported |
@@ -192,13 +192,45 @@ Applying a preset adds its masks to the photo's own (masks the photo already has
 slider scales them. A sidecar's masks replace the photo's, because a sidecar holds the whole edit. Components we can't
 carry over are listed in `preset.import`'s `unmapped` as `Mask: <kind>`.
 
+## Local adjustment presets (mask effects)
+
+`mask.importEffects {path | paths, group?, dryRun?}` (and `preset.import`, File ▸ Import Profiles & Presets…, drag & drop)
+reads these into the Masking panel's Effect menu (`crates/engine/src/cmd/mask_effect_files.rs`):
+
+| File | How it is read |
+|---|---|
+| Lightroom Classic `.lrtemplate` (`%APPDATA%\Adobe\Lightroom\Local Adjustment Presets`, `~/Library/Application Support/Adobe/Lightroom/Local Adjustment Presets`) | a Lua table with `type = "LocalizedAdjustmentPreset"`; `title` (else `internalName`, else the file name) → name; `value` holds the `Local*` field names in lower camel case: `exposure2012` → `LocalExposure2012`, mapped as in the table above (`exposure`, `contrast`, `clarity` are the older process version's; the 2012 fields win); `luminanceNoise` → Noise, `toningHue` / `toningSaturation` → Color |
+| Camera Raw local-correction `.xmp` (`CameraRaw/LocalCorrections`) | top-level `crs:Local*` properties (or, in a file with `crs:PresetType="Local"` without them, its first correction's); `crs:Name` → name, `crs:Group` → group. Develop presets (no `crs:Local*`) stay develop presets |
+| `.lceffect` | ours: `{"format": "lightcraft.maskEffects", "version": 2, "effects": [{name, adjust, group?, favorite?, fields?, with_amount?, brush?, extra?}]}` (a bare array or one effect also reads); `mask.exportEffects {path, names?, group?}` writes it |
+| `.zip` | the presets above inside it; its folders give groups |
+
+Groups: a file's folder (relative to the imported folder; names that only say "local adjustment presets" don't count)
+names its group, unless the file names one. Lightroom users mark sections of the flat preset menu with **divider
+presets**: presets that set nothing, named like `10 ----- DETAIL ENHANCERS ----- 10` (a run of three or more `-`, `=`,
+`_`, `*`, `#`, `~`, `—`, `.`). These become groups instead of effects: a preset whose name starts with a number goes to
+the divider with the largest number not above it (`12 Sky` under `10 ----- DETAIL ENHANCERS ----- 10` → *Detail
+Enhancers*); presets without a number keep their folder's group. An earlier import's divider effects are removed.
+Same-named effects are replaced (a star is kept).
+
+Settings with no local slider here are listed per preset in `unmapped` (and the toast) and **kept** with the effect in
+`extra` (an `.lceffect` export carries them), but not applied: `grain` (Grain; LightCraft has no local grain),
+`pointColors` (Point Color: `SrcHue/Sat/Lum`, `HueShift`, `SatScale`, `LumScale`, `RangeAmount`, `Hue/Sat/LumRange`
+`{LowerNone, LowerFull, UpperFull, UpperNone}`; there is global Point Color only), `toningLuminance`. Zero values aren't
+listed (`refineSaturation = 0` in most files). Lightroom keeps brush size, feather, flow and density per brush, not in
+presets, so there is nothing to import for them; an effect saved here can carry them (`brush`).
+
+Applying (`mask.applyEffect {name, id? | ids? | all?, photos?: "selected"}`) sets the sliders the effect carries —
+all of them for an imported preset (unnamed ones to 0, as Lightroom does), or only the ones chosen when it was saved
+(`mask.saveEffect {fields: "changed" | [..]}`) — and Amount only if it carries it. The effect is remembered for the
+mask's kind: the next brush / linear / radial / … mask starts with it (`mask.toolEffect`).
+
 ## Preset files
 
 | | |
 |---|---|
 | Ours: `.lcpreset` | JSON `{"format": "lightcraft.preset", "version": 1, "presets": [{id, name, group, settings}]}`, where `settings` is a partial develop-settings object (only the groups the preset includes). A file can hold one preset or many, and every preset keeps its group. Import also accepts a bare preset object or an array of them. |
 | Export | `preset.export {path, ids?, group?}`: all user presets by default, or the given ids or one group. In the app: File ▸ Export Presets…, Presets panel ▸ ⋯ ▸ Export User Presets…, or right-click a group ▸ Export Group…. |
-| Import | `preset.import {paths, group?, dryRun?}`: files or folders (recursive): `.lcpreset`, `.xmp`, classic `.lrtemplate` (a Lua table: `value.settings` holds the same field names as `crs:`), photos that carry their edits in XMP ("DNG presets" from mobile apps; their crop, geometry and custom white balance are left out) and `.zip` bundles of any of these. Presets in a folder (or a folder inside a zip) go to a group named after it, unless the file names its own group. The result lists, per preset, the settings that couldn't be carried over (`unmapped`, e.g. `CameraProfile`, `Look`, local masks), and the app's toast names them; fields that only describe the preset or the photo (`Cluster`, `SortName`, `Description`, `SupportsAmount2`, `RequiresRGBTables`, `CropConstrainToWarp`, `OverrideLookVignette`, `AsShotTemperature` / `AsShotTint`, empty `PointColors` slots) aren't listed. Older (process version 2010) fields — `Exposure`, `Contrast`, `FillLight`, `HighlightRecovery`, `Shadows`, `Brightness`, `Clarity`, `ToneCurve` — are approximated with today's sliders when a preset has no 2012-era fields. Dropping preset files on the window imports them too. In the app: File ▸ Import Presets…, or Presets panel ▸ ⋯ ▸ Import Presets…. A preset that's already there (same name, group and settings) is skipped. If an id clashes, the import gets a fresh `user.*` id, and built-in presets are never replaced. |
+| Import | `preset.import {paths, group?, dryRun?}`: files or folders (recursive): `.lcpreset`, `.xmp`, classic `.lrtemplate` (a Lua table: `value.settings` holds the same field names as `crs:`), photos that carry their edits in XMP ("DNG presets" from mobile apps; their crop, geometry and custom white balance are left out) and `.zip` bundles of any of these. Local adjustment (brush) presets — Lightroom Classic's `.lrtemplate` with `type = "LocalizedAdjustmentPreset"`, Camera Raw's local-correction `.xmp`, our `.lceffect`, also inside zips — become mask effects (`mask.effects`) instead (see *Local adjustment presets* below); the result lists them under `effects`, and divider presets under `effectDividers`. Presets in a folder (or a folder inside a zip) go to a group named after it, unless the file names its own group. The result lists, per preset, the settings that couldn't be carried over (`unmapped`, e.g. `CameraProfile`, `Look`, local masks), and the app's toast names them; fields that only describe the preset or the photo (`Cluster`, `SortName`, `Description`, `SupportsAmount2`, `RequiresRGBTables`, `CropConstrainToWarp`, `OverrideLookVignette`, `AsShotTemperature` / `AsShotTint`, empty `PointColors` slots) aren't listed. Older (process version 2010) fields — `Exposure`, `Contrast`, `FillLight`, `HighlightRecovery`, `Shadows`, `Brightness`, `Clarity`, `ToneCurve` — are approximated with today's sliders when a preset has no 2012-era fields. Dropping preset files on the window imports them too. In the app: File ▸ Import Presets…, or Presets panel ▸ ⋯ ▸ Import Presets…. A preset that's already there (same name, group and settings) is skipped. If an id clashes, the import gets a fresh `user.*` id, and built-in presets are never replaced. |
 | XMP presets | Read with the `crs:` table above, with `crs:Name` as the name (falling back to the file name) and `crs:Group` as the group (falling back to "Imported Presets"). Only the fields the preset sets are included, so applying it leaves everything else alone and the Amount slider scales it like any other preset. We only read XMP presets; we don't write them. |
 
 LightCraft ships no third-party presets. Its built-in presets are its own values (`crates/engine/src/presets.rs`).

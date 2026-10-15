@@ -12,9 +12,11 @@
 //! 4. **Weights.** `wᵢ = kᵢ · (1 − smoothstep(0.80·clip, 0.96·clip, max channel))`: longer
 //!    exposures get more weight (shot-noise optimal for a linear sensor), saturated pixels none
 //!    (all channels together, so a clipped channel never shifts colour). The darkest frame keeps a
-//!    tiny weight so fully saturated pixels still get a value.
-//! 5. **Deghost** (None/Low/Medium/High): on a ≤ 1024 px version, a per-pixel consistency test
-//!    against the reference: the reference radiance (or, where the reference is clipped/too dark,
+//!    tiny weight so fully saturated pixels still get a value. Where the reference is at or near its clip, the scene is
+//!    at least that bright: a frame reading far darker there saw something that moved (a star, the moon, a light) and is
+//!    left out, so a clipped highlight of the reference is never replaced by content from another moment.
+//! 5. **Deghost** (None/Low/Medium/High): on a ≤ 2048 px version, a per-pixel consistency test
+//!    against the reference: the reference radiance (or, where the reference is clipped or black,
 //!    the nearest well-exposed frame's) predicts what each frame should have recorded; frames that
 //!    disagree by more than a threshold (in log units, with a noise floor) are masked there. Masks
 //!    are dilated and feathered (Gaussian), upsampled, and remove the frame's weight. Their union
@@ -86,6 +88,10 @@ pub struct HdrResult {
     /// The reference frame's lens corrections, for `radiance` ([`Frame::lens`]).
     pub lens: Vec<lightcraft_raw::Opcode>,
 }
+
+/// Long edge (at most) of the frames the deghost test compares: small moving things (a star at 200 mm) still span a few
+/// pixels there.
+const DEGHOST_EDGE: usize = 2048;
 
 #[inline]
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -161,15 +167,9 @@ pub fn merge_hdr(mut frames: Vec<Frame>, opts: &HdrOptions, progress: &Progress)
             alignments[i] = a;
         }
         check(progress, 0.35, "Resampling")?;
-        let warped: Vec<(usize, Rgb32f, Vec<bool>)> = (0..n)
-            .into_par_iter()
-            .filter(|&i| i != reference && alignments[i].model != "identity")
-            .map(|i| {
-                let (img, v) = align::warp(&frames[i].image, &alignments[i].h);
-                (i, img, v)
-            })
-            .collect();
-        for (i, img, v) in warped {
+        // one frame at a time (the warp is parallel inside): each warped copy replaces its frame before the next is made
+        for i in (0..n).filter(|&i| i != reference && alignments[i].model != "identity") {
+            let (img, v) = align::warp(&frames[i].image, &alignments[i].h);
             frames[i].image = img;
             valid[i] = Some(v);
         }
@@ -215,6 +215,9 @@ pub fn merge_hdr(mut frames: Vec<Frame>, opts: &HdrOptions, progress: &Progress)
             let i_px = y * w + x;
             let mut acc = [0f64; 3];
             let mut ws = 0f64;
+            // the reference at or near its clip: the radiance is at least this
+            let mr = maxc(fr[reference].image.data[i_px]);
+            let bound = if mr >= 0.80 * clips[reference] { mr / k[reference] } else { 0.0 };
             for i in 0..n {
                 if vd[i].as_ref().is_some_and(|v| !v[i_px]) {
                     continue;
@@ -227,6 +230,9 @@ pub fn merge_hdr(mut frames: Vec<Frame>, opts: &HdrOptions, progress: &Progress)
                 }
                 if i == reference {
                     wt += 1e-9;
+                } else if bound > 0.0 {
+                    // a frame far darker than that saw something that moved there
+                    wt *= smoothstep(0.35, 0.6, m / k[i] / bound);
                 }
                 if i != reference
                     && let Some((maps, fac)) = gs
@@ -362,35 +368,40 @@ fn deghost_maps(
 ) -> (Vec<Plane>, usize) {
     let n = frames.len();
     let (w, h) = (frames[0].width(), frames[0].height());
-    let fac = w.max(h).div_ceil(1024).max(1);
+    let fac = w.max(h).div_ceil(DEGHOST_EDGE).max(1);
+    // the dilation/feather radius was chosen for a 1024 px map: keep it the same share of the picture
+    let r = (r as f32 * (w.max(h) as f32 / fac as f32 / 1024.0).max(1.0)).round() as usize;
     let small: Vec<(Rgb32f, Vec<f32>)> = (0..n).into_par_iter().map(|i| shrink(&frames[i].image, valid[i].as_deref(), fac)).collect();
     let (sw, sh) = (small[0].0.width, small[0].0.height);
     let rpos = order.iter().position(|&i| i == reference).unwrap_or(0);
-    let good = |i: usize, p: usize| -> bool {
+    // `dark`: the share of the clip below which a frame's (averaged) pixel is too noisy to predict from
+    let good = |i: usize, p: usize, dark: f32| -> bool {
         let f = &frames[i];
         let m = maxc(small[i].0.data[p]);
-        let dark = if f.raw { 0.01 } else { 0.04 };
         small[i].1[p] > 0.99 && m < 0.8 * f.clip && m > dark * f.clip
     };
+    let dark = |i: usize| if frames[i].raw { 0.01 } else { 0.04 };
     // predicted reference radiance per pixel
     let pred: Vec<[f32; 3]> = (0..sw * sh)
         .into_par_iter()
         .map(|p| {
             let rad = |i: usize| small[i].0.data[p].map(|v| v / k[i]);
-            if good(reference, p) {
+            // the reference predicts down to a tenth of the other frames' floor (the map's averaging tames its noise): in a
+            // dark sky the brighter frames must not predict themselves, or their ghosts would look consistent
+            if good(reference, p, dark(reference) * 0.1) {
                 return rad(reference);
             }
             let bright = maxc(small[reference].0.data[p]) >= 0.8 * frames[reference].clip;
             if bright {
                 for q in (0..rpos).rev() {
-                    if good(order[q], p) {
+                    if good(order[q], p, dark(order[q])) {
                         return rad(order[q]);
                     }
                 }
                 rad(order[0])
             } else {
                 for &i in &order[rpos + 1..] {
-                    if good(i, p) {
+                    if good(i, p, dark(i)) {
                         return rad(i);
                     }
                 }

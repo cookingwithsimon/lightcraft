@@ -5,7 +5,7 @@ use lightcraft_develop::{DevelopSettings, Preset, ProcessVersion, Section, Setti
 use lightcraft_geom::{CropGeometry, CropHandle, Point, Rect, crop_fit_angle, drag_crop};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, always, bad, bool_or, cmd, f64_or, f64_req, has_active, has_clipboard, has_selection, ok, str_param};
+use super::{CommandSpec, always, bad, bool_or, cmd, f64_or, f64_req, has_active, has_clipboard, has_selection, index_req, ok, str_param};
 use crate::{Result, Session, media::SourceLevel};
 
 fn active(s: &Session, c: &str) -> Result<PhotoId> {
@@ -144,7 +144,7 @@ fn user_preset<'a>(s: &'a mut Session, p: &Value, c: &str) -> Result<&'a mut Pre
 /// Change version `p.index` of the active photo (`f` gets it and the current settings).
 fn edit_version(s: &mut Session, p: &Value, c: &str, label: &str, f: impl FnOnce(&mut Version, std::sync::Arc<DevelopSettings>)) -> Result<Value> {
     let id = active(s, c)?;
-    let i = f64_req(p, "index", c)? as usize;
+    let i = index_req(p, "index", c)?;
     let ph = s.catalog.photo(id).ok_or_else(|| bad(c, "no photo"))?;
     let mut versions = ph.versions.clone();
     let v = versions.get_mut(i).ok_or_else(|| bad(c, "no such version"))?;
@@ -588,14 +588,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "Straighten",
             [],
             None,
-            "{angle: degrees -45..45} — keeps the largest crop of the current aspect",
+            "{angle: degrees -45..45} — keeps the crop if it still fits, else shrinks it about its centre (the largest crop of its aspect stays the largest)",
             has_active,
             |s, p| {
                 let id = active(s, "crop.straighten")?;
                 let (w, h) = crop_dims(s, id);
                 let angle = f64_req(p, "angle", "crop.straighten")?.clamp(-45.0, 45.0);
                 edit(s, "crop.straighten", "Straighten", |d| {
-                    // keep the current crop if it still fits, else the largest of its aspect that does
+                    // keep the current crop if it still fits, else shrink it about its centre until it does
                     d.crop.geometry = d.crop.geometry.with_angle(angle, w, h);
                     Ok(())
                 })
@@ -678,10 +678,11 @@ pub fn specs() -> Vec<CommandSpec> {
             let (w, h) = crop_dims(s, id);
             edit(s, "crop.rotateAspect", "Rotate Crop", |d| {
                 let r = d.crop.geometry.rect_px(w, h);
-                let a = r.height() / r.width();
+                // a degenerate crop has no aspect to rotate: fall back to the image's own
+                let a = Some(r.height() / r.width()).filter(|a| a.is_finite() && *a > 0.0);
                 d.crop.aspect = d.crop.aspect.map(|(x, y)| (y, x));
                 let angle = d.crop.geometry.angle;
-                d.crop.geometry = crop_fit_angle(w, h, angle, Some(a));
+                d.crop.geometry = crop_fit_angle(w, h, angle, a);
                 Ok(())
             })
         }),
@@ -1060,14 +1061,14 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         cmd!("version.restore", "Restore Version", [], None, "{index}", has_active, |s, p| {
             let id = active(s, "version.restore")?;
-            let i = f64_req(p, "index", "version.restore")? as usize;
+            let i = index_req(p, "index", "version.restore")?;
             let v = s.catalog.photo(id).and_then(|ph| ph.versions.get(i).cloned()).ok_or_else(|| bad("version.restore", "no such version"))?;
             s.set_develop(id, (*v.settings).clone(), &format!("Restore {}", v.name))?;
             ok()
         }),
         cmd!("version.delete", "Delete Version", [], None, "{index}", has_active, |s, p| {
             let id = active(s, "version.delete")?;
-            let i = f64_req(p, "index", "version.delete")? as usize;
+            let i = index_req(p, "index", "version.delete")?;
             let mut versions = s.catalog.photo(id).map(|ph| ph.versions.clone()).unwrap_or_default();
             if i >= versions.len() {
                 return Err(bad("version.delete", "no such version"));

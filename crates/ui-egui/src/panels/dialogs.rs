@@ -226,9 +226,11 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::RenameAlbum { .. } => "Rename Album",
         Dialog::Rename { .. } => "Rename Photos",
         Dialog::Import { .. } => "Import Photos",
+        Dialog::LightroomResult { .. } => "Lightroom Catalog Import",
         Dialog::LabelNames { .. } => "Edit Color Label Names",
         Dialog::CaptureTime { .. } => "Edit Capture Time",
         Dialog::RenameKeyword { .. } => "Rename Keyword",
+        Dialog::RenamePerson { .. } => "Rename Person",
         Dialog::KeywordTag { editing: None, .. } => "Create Keyword Tag",
         Dialog::KeywordTag { .. } => "Edit Keyword Tag",
         Dialog::DeleteKeyword { .. } => "Delete Keyword",
@@ -251,10 +253,15 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::PasteSettings { .. } => "Paste Selected Settings",
         Dialog::Export { .. } => "Export",
         Dialog::ContactSheet { .. } => "Contact Sheet PDF",
+        Dialog::SlideshowExport { .. } => "Export Slideshow",
         Dialog::Merge { opts } => opts.title(),
         Dialog::Settings { .. } => "Settings",
         Dialog::ConfirmDelete { .. } => "Delete Photos",
         Dialog::LightroomCatalog { .. } => "Lightroom Classic Catalog",
+        Dialog::SaveEffect { .. } => "New Effect Preset",
+        Dialog::ManageEffects { .. } => "Manage Effect Presets",
+        Dialog::DeleteEffects { names } if names.len() == 1 => "Delete Effect Preset",
+        Dialog::DeleteEffects { .. } => "Delete Effect Presets",
         Dialog::RemoveFolder { disk: true, .. } => "Remove Disk from Library",
         Dialog::RemoveFolder { .. } => "Remove Folder from Library",
         Dialog::SynchronizeFolder { .. } => "Synchronize Folder",
@@ -276,7 +283,16 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
     // previous frame (a guess on the first one).
     let chrome_id = window_id.with("chrome");
     let chrome = ctx.data(|d| d.get_temp::<f32>(chrome_id)).unwrap_or(DIALOG_CHROME_GUESS);
-    let body_max = (screen.height() - 2.0 * DIALOG_SCREEN_MARGIN - chrome).max(DIALOG_MIN_BODY);
+    // Settings keeps its top edge, and the widest it has been, while tabs of different sizes are shown, so its tab
+    // row stays where it is (centred like the others, the row jumped with each tab's height)
+    let settings = matches!(dlg, Dialog::Settings { .. });
+    let top = (screen.height() * 0.08).clamp(DIALOG_SCREEN_MARGIN, 96.0);
+    let body_max =
+        if settings { screen.height() - top - DIALOG_SCREEN_MARGIN - chrome } else { screen.height() - 2.0 * DIALOG_SCREEN_MARGIN - chrome }
+            .max(DIALOG_MIN_BODY);
+    let widest_id = window_id.with("widest");
+    let widest = if settings { ctx.data(|d| d.get_temp::<f32>(widest_id)).unwrap_or(0.0).min(screen.width() * 0.9) } else { 0.0 };
+    let mut content_w = 0.0f32;
     let mut body_h = None;
     let shown = egui::Window::new(crate::i18n::tr(&title)).id(window_id)
         .collapsible(false)
@@ -284,13 +300,15 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         .vscroll(import)
         .resize(|r| if import { r.default_height(crate::import::DIALOG_SIZE[1]) } else { r })
         .frame(frame)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .anchor(if settings { egui::Align2::CENTER_TOP } else { egui::Align2::CENTER_CENTER }, [0.0, if settings { top } else { 0.0 }])
+        .min_width(widest)
         .default_width(match dlg {
             Dialog::Import { .. } => crate::import::DIALOG_SIZE[0],
             Dialog::SmartRules { .. } => 680.0,
             Dialog::AllMetadata { .. } => 620.0,
             Dialog::FaceModel { .. } => 460.0,
             Dialog::LightroomCatalog { .. } => 440.0,
+            Dialog::ManageEffects { .. } => 560.0,
             _ => 380.0,
         })
         .show(ctx, |ui| {
@@ -345,6 +363,20 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 }
                 Dialog::DenoiseModel { info, accepted } => crate::panels::denoise::model_dialog(app, ui, &t, info, accepted),
                 Dialog::FaceModel { info, accepted, .. } => crate::panels::faces::model_dialog(app, ui, &t, info, accepted),
+                Dialog::LightroomResult { summary, library, details, .. } => {
+                    ui.label(summary.as_str());
+                    ui.add_space(8.0);
+                    if let Some(library) = library {
+                        ui.label(crate::i18n::tr("Destination library"));
+                        ui.add(egui::Label::new(library.as_str()).wrap().selectable(true));
+                        ui.label(crate::i18n::tr("Lightroom catalogs import into the open library; no separate catalog folder is created."));
+                    } else {
+                        ui.label(crate::i18n::tr("These photos are only in memory. Open a library on disk and import the catalog again to save them."));
+                    }
+                    for detail in details.iter() {
+                        ui.add(egui::Label::new(detail).wrap().selectable(true));
+                    }
+                }
                 Dialog::SystemInfo { rows } => {
                     egui::Grid::new("sysinfo").num_columns(2).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
                         for (k, v) in rows.iter() {
@@ -558,7 +590,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                             egui::Grid::new("rename-preview").num_columns(3).spacing([8.0, 2.0]).show(ui, |ui| {
                                 for pl in rows {
                                     ui.label(egui::RichText::new(&pl.from).color(t.text_dim));
-                                    ui.label(egui::RichText::new("→").color(t.text_dim));
+                                    let (arrow, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                                    crate::icons::paint(ui.painter(), arrow, crate::icons::Icon::ChevronRight, t.text_dim);
                                     ui.label(egui::RichText::new(&pl.to).color(t.text));
                                     ui.end_row();
                                 }
@@ -571,6 +604,36 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     let more = total.saturating_sub(RENAME_PREVIEW_ROWS);
                     if more > 0 {
                         ui.label(egui::RichText::new(crate::i18n::tr_format!("… and {more} more", more = more)).color(t.text_dim));
+                    }
+                }
+                Dialog::RenamePerson { from, to, merge } => {
+                    let submitted = dialog_field(ui, "field:personName", to, "Name");
+                    let plan = person_rename_plan(&app.session.catalog, from, to);
+                    if !plan.needs_merge {
+                        *merge = false;
+                    }
+                    if submitted && plan.block.is_none() && (!plan.needs_merge || *merge) {
+                        confirm = true;
+                    }
+                    if let Some(why) = plan.block {
+                        ui.label(egui::RichText::new(crate::i18n::tr(why)).color(t.caution));
+                    } else {
+                        ui.label(
+                            egui::RichText::new(crate::i18n::tr_format!(
+                                "Renames {n} face{} across the library. The files are not changed.",
+                                if plan.faces == 1 { "" } else { "s" },
+                                n = plan.faces
+                            ))
+                            .color(t.text_dim),
+                        );
+                    }
+                    if plan.needs_merge {
+                        ui.label(
+                            egui::RichText::new(crate::i18n::tr_format!("“{to}” is already a person. Combining them makes one person; Undo separates them again.", to = to.trim()))
+                                .color(t.caution),
+                        );
+                        let r = ui.checkbox(merge, crate::i18n::tr("Combine with the existing person"));
+                        crate::widgets::register(ui.ctx(), "check:personMerge", r.rect);
                     }
                 }
                 Dialog::RenameKeyword { from, to } => {
@@ -640,13 +703,14 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     );
                     group_checklist(ui, "pasteGroup", groups);
                 }
+                Dialog::SlideshowExport { settings } => slideshow_export_body(app, ui, settings),
                 Dialog::ContactSheet { options } => {
                     options.columns = options.columns.clamp(1, 8);
                     options.rows = options.rows.clamp(1, 10);
                     let n = app.session.targets(&json!({})).len();
                     ui.label(format!("{n} selected photos · {} pages", n.div_ceil(options.columns * options.rows)));
                     field(ui, "Paper", |ui| {
-                        egui::ComboBox::from_id_salt("contactSheetPaper").selected_text(&options.paper).show_ui(ui, |ui| {
+                        crate::widgets::combo_box("contactSheetPaper").selected_text(&options.paper).show_ui(ui, |ui| {
                             ui.selectable_value(&mut options.paper, "a4".into(), "A4");
                             ui.selectable_value(&mut options.paper, "letter".into(), "Letter");
                         });
@@ -656,7 +720,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     field(ui, "Rows", |ui| { ui.add(egui::DragValue::new(&mut options.rows).range(1..=10)); });
                     ui.checkbox(&mut options.captions, "Filename captions");
                     ui.label("150 dpi · sRGB · current edits · fit without cropping");
-                    ui.label("Choose a PDF destination after confirming. Print the PDF from your viewer.");
+                    ui.label(crate::i18n::tr("Choose a PDF destination after confirming. Print the PDF from your viewer."));
                 }
                 Dialog::Export { opts, full_size, resize, preset_name, limit_kb, dir } => {
                     use lightcraft_engine::export::{ExportFormat as F, MetadataPolicy as M, SharpenAmount as A, SharpenFor as S};
@@ -665,7 +729,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     // Preset: load a built-in or saved set of options into the dialog
                     field(ui, "Preset", |ui| {
                         let mut chosen = None;
-                        let c = egui::ComboBox::from_id_salt("exportPreset").width(220.0).selected_text(crate::i18n::tr("Choose…")).show_ui(ui, |ui| {
+                        let c = crate::widgets::combo_box("exportPreset").width(220.0).selected_text(crate::i18n::tr("Choose…")).show_ui(ui, |ui| {
                             let mut builtin = true;
                             for (p, b) in app.session.all_export_presets() {
                                 if builtin && !b {
@@ -728,7 +792,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         let tip = "Photos edited in HDR: JPEG with an HDR gain map (looks right everywhere, brighter highlights on HDR displays), AVIF as 10-bit, PNG and JPEG XL as 16-bit Rec. 2020 PQ; TIFF needs 32-bit float";
                         ui.checkbox(&mut opts.hdr, "HDR output").on_hover_text(tip);
                         if opts.hdr && !opts.hdr_output() {
-                            ui.label(egui::RichText::new("HDR TIFF needs 32-bit float.").color(t.text_dim));
+                            ui.label(egui::RichText::new(crate::i18n::tr("HDR TIFF needs 32-bit float.")).color(t.text_dim));
                         }
                         if opts.hdr && opts.format == F::Avif {
                             use lightcraft_engine::export::HdrCurve as H;
@@ -737,13 +801,17 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     if !rendered {
                     } else if opts.format == F::Avif && opts.hdr {
-                        let curve = if opts.hdr_transfer == lightcraft_engine::export::HdrCurve::Hlg { "HLG" } else { "PQ" };
-                        ui.label(egui::RichText::new(format!("Color space: Rec. 2020 {curve} (HDR AVIF)")).color(t.text_dim));
+                        let label = if opts.hdr_transfer == lightcraft_engine::export::HdrCurve::Hlg {
+                            crate::i18n::tr("Color space: Rec. 2020 HLG (HDR AVIF)")
+                        } else {
+                            crate::i18n::tr("Color space: Rec. 2020 PQ (HDR AVIF)")
+                        };
+                        ui.label(egui::RichText::new(label).color(t.text_dim));
                     } else if opts.format == F::Png && opts.hdr {
-                        ui.label(egui::RichText::new("Color space: Rec. 2020 PQ, 16-bit (HDR PNG)").color(t.text_dim))
-                            .on_hover_text("Viewers that don't read the PNG cICP chunk show PQ values as sRGB: flat and washed out. For a picture that looks right everywhere, use JPEG (gain map).");
+                        ui.label(egui::RichText::new(crate::i18n::tr("Color space: Rec. 2020 PQ, 16-bit (HDR PNG)")).color(t.text_dim))
+                            .on_hover_text(crate::i18n::tr("Viewers that don't read the PNG cICP chunk show PQ values as sRGB: flat and washed out. For a picture that looks right everywhere, use JPEG (gain map)."));
                     } else if opts.format == F::Jxl && opts.hdr {
-                        ui.label(egui::RichText::new("Color space: Rec. 2020 PQ (HDR JPEG XL)").color(t.text_dim));
+                        ui.label(egui::RichText::new(crate::i18n::tr("Color space: Rec. 2020 PQ (HDR JPEG XL)")).color(t.text_dim));
                     } else if opts.format == F::Avif {
                         ui.label(egui::RichText::new(crate::i18n::tr("Color space: sRGB (AVIF)")).color(t.text_dim));
                     } else {
@@ -904,7 +972,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                     if opts.format == F::Dng {
                         use lightcraft_engine::export::DngCompression as Z;
-                        choices(ui, "Compression", "exportDngCompression", &[(Z::Lossless, "Lossless"), (Z::Deflate, "ZIP"), (Z::Uncompressed, "None")], &mut opts.dng_compression);
+                        choices(ui, "Compression", "exportDngCompression", &[(Z::Lossless, "Lossless"), (Z::Deflate, "ZIP"), (Z::Uncompressed, "None"), (Z::Lossy, "Lossy")], &mut opts.dng_compression);
                     }
                     let naming_id = egui::Id::new("export-naming");
                     let tags_open = field(ui, "File name", |ui| {
@@ -923,18 +991,32 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                             opts.start_number = v as u32;
                         }
                     }
-                    field(ui, "Folder", |ui| {
-                        trailing_button_row(ui, |ui| {
-                            if app.services.pick_folder.is_some()
-                                && crate::widgets::text_button(ui, "exportChooseFolder", crate::i18n::tr("Choose…"), false).clicked()
-                                && let Some(pick) = app.services.pick_folder.as_mut()
-                                && let Some(d) = pick()
-                            {
-                                *dir = d;
-                            }
-                            crate::widgets::named(ui.add(egui::TextEdit::singleline(dir).desired_width(ui.available_width())), crate::i18n::tr("Folder"));
+                    // like Lightroom Classic's Export To: one folder, or each photo's own folder (not on
+                    // the web, where originals live in the browser's storage, not in folders)
+                    use lightcraft_engine::export::DestinationMode as D;
+                    if !cfg!(target_arch = "wasm32") || opts.destination_mode != D::SpecificFolder {
+                    choices(
+                        ui,
+                        "Export to",
+                        "exportDestinationMode",
+                        &[(D::SpecificFolder, "Specific folder"), (D::SameAsOriginal, "Same folder as original photo")],
+                        &mut opts.destination_mode,
+                    );
+                    }
+                    if opts.destination_mode == D::SpecificFolder {
+                        field(ui, "Folder", |ui| {
+                            trailing_button_row(ui, |ui| {
+                                if app.services.pick_folder.is_some()
+                                    && crate::widgets::text_button(ui, "exportChooseFolder", crate::i18n::tr("Choose…"), false).clicked()
+                                    && let Some(pick) = app.services.pick_folder.as_mut()
+                                    && let Some(d) = pick()
+                                {
+                                    *dir = d;
+                                }
+                                crate::widgets::named(ui.add(egui::TextEdit::singleline(dir).desired_width(ui.available_width())), crate::i18n::tr("Folder"));
+                            });
                         });
-                    });
+                    }
                     field(ui, "Subfolder", |ui| {
                         crate::widgets::named(ui.add(egui::TextEdit::singleline(&mut opts.subfolder).hint_text(crate::i18n::tr("none")).desired_width(f32::INFINITY)), crate::i18n::tr("Subfolder"))
                     });
@@ -1113,6 +1195,22 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         .color(t.text_dim),
                     );
                 }
+                Dialog::SaveEffect { name, group, fields, amount, brush } => {
+                    if crate::panels::mask_effects::save_body(app, ui, name, group, fields, amount, brush) {
+                        confirm = true;
+                    }
+                }
+                Dialog::ManageEffects { search, selected, rename, confirm_delete, new_group } => {
+                    crate::panels::mask_effects::manage_body(app, ui, search, selected, rename, confirm_delete, new_group)
+                }
+                Dialog::DeleteEffects { names } => {
+                    let what = match names.as_slice() {
+                        [one] => crate::i18n::tr_format!("Delete the effect preset “{name}”?", name = one),
+                        _ => crate::i18n::tr_format!("Delete these {n} effect presets?", n = names.len()),
+                    };
+                    ui.label(what);
+                    ui.label(egui::RichText::new(crate::i18n::tr("Masks keep their sliders. Export presets first to keep a copy.")).color(t.text_dim));
+                }
                 Dialog::ConfirmDelete { count } => {
                     let what = if *count == 1 { crate::i18n::tr("this photo").to_string() } else { crate::i18n::tr_format!("these {count} photos", count = count) };
                     ui.label(crate::i18n::tr_format!("Move {what} to Recently Deleted?", what = what));
@@ -1199,9 +1297,11 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 // only shows something (one Close, no Cancel / OK)
                 let unusable_model = matches!(&dlg, Dialog::DenoiseModel { info, .. } | Dialog::FaceModel { info, .. } if info["kind"] == "unsupported");
                 let informational = unusable_model
+                    || matches!(dlg, Dialog::LightroomResult { first: None, .. })
                     || matches!(
                         dlg,
                         Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
+                            | Dialog::ManageEffects { .. }
                     );
                 let sam = &app.session.segmenter;
                 let (sam_installed, sam_running, sam_failed) = (sam.installed(), sam.download_status().running, sam.download_status().error.is_some());
@@ -1210,6 +1310,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 let cancel = match &dlg {
                     Dialog::SamModel { .. } if sam_running || sam_installed || sam_nowhere => "Close",
                     Dialog::SamModel { .. } => "Not Now",
+                    Dialog::LightroomResult { .. } => "Close",
                     _ => "Cancel",
                 };
                 if !informational {
@@ -1227,13 +1328,16 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         add_label = crate::i18n::tr_format!("{verb} {n} Photo{}", if n == 1 { "" } else { "s" }, verb = crate::i18n::tr(verb), n = n);
                         add_label.as_str()
                     }
+                    Dialog::LightroomResult { first: Some(_), .. } => "Show in Library",
                     Dialog::ContactSheet { .. } => "Choose PDF…",
+                    Dialog::SlideshowExport { .. } => "Export…",
                     Dialog::Merge { .. } => "Merge",
                     Dialog::DenoiseModel { info, .. } if info["download"].is_string() => "Accept & Download",
                     Dialog::DenoiseModel { .. } => "Install",
                     Dialog::FaceModel { info, .. } if !informational && info["download"].is_string() => "Download",
                     Dialog::FaceModel { .. } if !informational => "Install",
-                    Dialog::ConfirmDelete { .. } | Dialog::DeleteKeyword { .. } => "Delete",
+                    Dialog::ConfirmDelete { .. } | Dialog::DeleteKeyword { .. } | Dialog::DeleteEffects { .. } => "Delete",
+                    Dialog::SaveEffect { .. } => "Create",
                     // (not "Merge": that is photo merging, HDR / panorama, in some languages)
                     Dialog::MoveKeyword { .. } => "Merge Keywords",
                     Dialog::KeywordSet { .. } => "Save",
@@ -1246,18 +1350,27 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::SamModel { .. } if sam_installed || sam_running || sam_nowhere => "",
                     Dialog::SamModel { error, .. } if error.is_some() || sam_failed => "Try Again",
                     Dialog::SamModel { .. } => "Download",
+                    Dialog::RenamePerson { from, to, .. } if person_rename_plan(&app.session.catalog, from, to).needs_merge => "Merge",
                     _ if informational => "Close",
                     _ => "OK",
                 };
                 // installing waits for the licence to be accepted
                 // (and Synchronize waits for the scan)
-                let can_confirm = informational
-                    || !matches!(
-                        &dlg,
-                        Dialog::DenoiseModel { accepted: false, .. } | Dialog::FaceModel { accepted: false, .. } | Dialog::SynchronizeFolder { counts: None, .. }
-                    )
-                        // smart-album rules that can't mean anything wait to be fixed
-                        && !matches!(&dlg, Dialog::SmartRules { id, rules, .. } if !rules.check_for(&app.session.catalog, id.map(lightcraft_catalog::AlbumId)).is_empty());
+                let rename_blocked = match &dlg {
+                    Dialog::RenamePerson { from, to, merge } => {
+                        let plan = person_rename_plan(&app.session.catalog, from, to);
+                        plan.block.is_some() || (plan.needs_merge && !*merge)
+                    }
+                    _ => false,
+                };
+                let can_confirm = !rename_blocked
+                    && (informational
+                        || !matches!(
+                            &dlg,
+                            Dialog::DenoiseModel { accepted: false, .. } | Dialog::FaceModel { accepted: false, .. } | Dialog::SynchronizeFolder { counts: None, .. }
+                        )
+                            // smart-album rules that can't mean anything wait to be fixed
+                            && !matches!(&dlg, Dialog::SmartRules { id, rules, .. } if !rules.check_for(&app.session.catalog, id.map(lightcraft_catalog::AlbumId)).is_empty()));
                 let r = (!ok.is_empty()).then(|| ui.add_enabled(can_confirm, egui::Button::new(crate::i18n::tr(ok))));
                 if let Some(r) = &r {
                     crate::widgets::register(ui.ctx(), "button:dialogOk", r.rect);
@@ -1273,7 +1386,11 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
             if import {
                 crate::import::note_dialog_bottom(ui);
             }
+            content_w = ui.min_rect().width();
         });
+    if settings && content_w > widest + 0.5 {
+        ctx.data_mut(|d| d.insert_temp(widest_id, content_w));
+    }
     if let Some(w) = shown {
         ctx.memory_mut(|m| m.set_modal_layer(w.response.layer_id));
         if let Some(body_h) = body_h {
@@ -1301,12 +1418,14 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::Import { .. }
                         | Dialog::Export { .. }
                         | Dialog::ContactSheet { .. }
+                        | Dialog::SlideshowExport { .. }
                         | Dialog::NewAlbum { .. }
                         | Dialog::NewSmartAlbum { .. }
                         | Dialog::SmartRules { .. }
                         | Dialog::KeywordTag { .. }
                         | Dialog::KeywordSet { .. }
                         | Dialog::SynchronizeFolder { .. }
+                        | Dialog::SaveEffect { .. }
                 ) =>
             {
                 app.toast(ctx, e)
@@ -1552,6 +1671,20 @@ pub(crate) fn album_entries(cat: &lightcraft_catalog::Catalog, editing: Option<u
 
 pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_json::Value, String> {
     match dlg {
+        Dialog::LightroomResult { first, .. } => {
+            if let Some(first) = first {
+                app.run("library.source", json!({"kind": "all"}))?;
+                let mut filter = serde_json::to_value(lightcraft_catalog::Filter::default()).map_err(|e| e.to_string())?;
+                // The filter command merges a patch; these defaults are omitted by serde.
+                filter["only"] = json!([]);
+                filter["labels"] = json!([]);
+                filter["ruleSet"] = serde_json::Value::Null;
+                app.run("library.filter", filter)?;
+                app.run("library.select", json!({"ids": [first]}))?;
+                app.ui.view = crate::state::ViewMode::PhotoGrid;
+            }
+            Ok(serde_json::Value::Null)
+        }
         Dialog::SamModel { then, .. } => {
             if app.session.segmenter.installed() {
                 // installed: start what the user was doing
@@ -1596,6 +1729,7 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         }
         Dialog::Rename { template, start } => app.run("photo.rename", json!({"template": template, "start": start})),
         Dialog::RenameKeyword { from, to } => app.run("keyword.rename", json!({"from": from, "to": to})),
+        Dialog::RenamePerson { from, to, merge } => app.run("faces.renamePerson", json!({"from": from, "to": to.trim(), "merge": merge})),
         Dialog::KeywordTag {
             editing,
             name,
@@ -1711,6 +1845,7 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
             }),
         ),
         Dialog::ContactSheet { options } => app.run("app.contactSheet", json!(options)),
+        Dialog::SlideshowExport { settings } => app.run("app.slideshowExport", json!(settings)),
         Dialog::CopySettings { groups } => app.run("develop.copy", json!({"groups": groups})),
         Dialog::PasteSettings { groups } => app.run("develop.paste", json!({"groups": groups})),
         Dialog::Export { opts, full_size, resize, limit_kb, dir, .. } => {
@@ -1726,9 +1861,13 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         Dialog::LightroomCatalog { catalog, .. } => {
             app.run("file.importLightroom", catalog.as_ref().map_or_else(|| json!({}), |c| json!({"path": c})))
         }
+        Dialog::SaveEffect { name, group, fields, amount, brush } => {
+            crate::panels::mask_effects::save_confirm(app, name, group, fields, *amount, *brush)
+        }
+        Dialog::DeleteEffects { names } => app.run("mask.deleteEffect", json!({"names": names})),
         Dialog::RemoveFolder { path, disk, .. } => app.run("library.removeFolder", json!({"path": path, "disk": disk})),
         d @ Dialog::SynchronizeFolder { .. } => crate::sync::confirm(app, d),
-        Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } => Ok(serde_json::Value::Null),
+        Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::ManageEffects { .. } => Ok(serde_json::Value::Null),
     }
 }
 
@@ -1821,7 +1960,7 @@ fn export_size(ui: &mut egui::Ui, full: &mut bool, r: &mut lightcraft_engine::ex
         field(ui, "Resize to", |ui| {
             let cur = MODES.iter().find(|m| m.0 == r.mode).map_or("Long Edge", |m| m.1);
             let before = r.mode;
-            let c = egui::ComboBox::from_id_salt("exportResizeMode").width(150.0).selected_text(crate::i18n::tr(cur)).show_ui(ui, |ui| {
+            let c = crate::widgets::combo_box("exportResizeMode").width(150.0).selected_text(crate::i18n::tr(cur)).show_ui(ui, |ui| {
                 for (m, l) in MODES {
                     ui.selectable_value(&mut r.mode, m, crate::i18n::tr(l));
                 }
@@ -1891,6 +2030,60 @@ fn num(ui: &mut egui::Ui, spec: &ControlSpec, v: &mut f64) -> bool {
 }
 
 /// A labelled row (fixed label column).
+/// View ▸ Export Slideshow…: what to write (PDF, JPEG sequence, video) and how big; where comes
+/// after (a save dialog).
+fn slideshow_export_body(app: &mut LightcraftApp, ui: &mut egui::Ui, settings: &mut lightcraft_engine::slideshow_export::ExportSettings) {
+    use lightcraft_engine::slideshow_export::{ExportSettings, Format};
+    let t = Tokens::get(ui.ctx());
+    let photos = app.session.visible_cloned().len();
+    let slide = app.session.slideshow.slide_duration;
+    let (intro, ending) = app.session.slide_titles.durations(slide);
+    let titles = usize::from(intro.is_some()) + usize::from(ending.is_some());
+    let seconds = photos as f64 * slide + intro.unwrap_or(0.0) + ending.unwrap_or(0.0);
+    let summary = crate::i18n::tr_format!(
+        "{n} photos in view · {slides} slides · {time}",
+        n = photos,
+        slides = photos + titles,
+        time = format!("{}:{:02}", (seconds / 60.0).floor() as u64, (seconds % 60.0).round() as u64)
+    );
+    ui.label(egui::RichText::new(summary).color(t.text_dim));
+    let before = settings.format;
+    choices(ui, "Format", "slideshowExportFormat", &[(Format::Pdf, "PDF"), (Format::Jpeg, "JPEG"), (Format::Video, "Video")], &mut settings.format);
+    if settings.format != before {
+        *settings = ExportSettings { full_screen: settings.full_screen, ..ExportSettings::for_format(settings.format) };
+    }
+    match settings.format {
+        Format::Video => {
+            choices(ui, "Size", "slideshowExportSize", &[(720, "720p"), (1080, "1080p")], &mut settings.size);
+            choices(ui, "Frame rate", "slideshowExportFps", &[(24, "24 fps"), (30, "30 fps")], &mut settings.fps);
+            let mut webm = settings.container == "webm";
+            choices(ui, "Container", "slideshowExportContainer", &[(false, "MP4"), (true, "WebM")], &mut webm);
+            settings.container = if webm { "webm".into() } else { "mp4".into() };
+        }
+        _ => {
+            choices(ui, "Size", "slideshowExportSize", &[(1024, "1024 px"), (1920, "1920 px"), (3840, "3840 px")], &mut settings.size);
+        }
+    }
+    field(ui, "Quality", |ui| {
+        let r = ui.add(egui::Slider::new(&mut settings.quality, 1..=100));
+        crate::widgets::register(ui.ctx(), "slider:slideshowExportQuality", r.rect);
+    });
+    let note = match settings.format {
+        Format::Pdf => {
+            let r = ui.checkbox(&mut settings.full_screen, crate::i18n::tr("Automatically show full screen"));
+            crate::widgets::register(ui.ctx(), "check:slideshowExportFullScreen", r.rect);
+            "One page per slide (the long side in pixels = points), with the slide duration and fade for the viewer's presentation mode."
+        }
+        Format::Jpeg => "Numbered JPEG files (name-001.jpg…) in a new folder named in the next step.",
+        Format::Video => "AV1 video, each slide held for its duration with its fades. No sound: music is not exported yet.",
+    };
+    ui.label(egui::RichText::new(crate::i18n::tr(note)).color(t.text_dim));
+    ui.label(
+        egui::RichText::new(crate::i18n::tr("Slides use the slideshow's layout, overlays and intro and ending screens, in view order."))
+            .color(t.text_dim),
+    );
+}
+
 fn field<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
@@ -1927,6 +2120,54 @@ fn choices<V: PartialEq + Copy>(ui: &mut egui::Ui, label: &str, id: &str, option
 /// field: `dialog_field`).
 fn return_confirms(dlg: &Dialog) -> bool {
     matches!(dlg, Dialog::CopySettings { .. } | Dialog::PasteSettings { .. })
+}
+
+struct PersonRenamePlan {
+    faces: usize,
+    needs_merge: bool,
+    /// Why Rename stays disabled. `None` when the typed name can be applied.
+    block: Option<&'static str>,
+}
+
+/// What renaming `from` to `to` would do, using the same rules as `faces.renamePerson`.
+fn person_rename_plan(cat: &lightcraft_catalog::Catalog, from: &str, to: &str) -> PersonRenamePlan {
+    let to_trim = to.trim();
+    if to_trim.is_empty() {
+        return PersonRenamePlan { faces: 0, needs_merge: false, block: Some("Type a name") };
+    }
+    if to_trim.chars().count() > 200 || to_trim.chars().any(char::is_control) {
+        return PersonRenamePlan { faces: 0, needs_merge: false, block: Some("A name is at most 200 characters, without control characters") };
+    }
+    let from_key = from.trim().to_lowercase();
+    let to_key = to_trim.to_lowercase();
+    let mut matched = 0usize;
+    let mut faces = 0usize;
+    let mut needs_merge = false;
+    if !from_key.is_empty() {
+        for photo in cat.photos().filter(|p| p.in_library()) {
+            for region in photo.meta.regions.iter().filter(|r| r.kind == lightcraft_meta::RegionKind::Face) {
+                let Some(name) = region.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) else { continue };
+                let key = name.to_lowercase();
+                if key == from_key {
+                    matched += 1;
+                    if region.name.as_deref() != Some(to_trim) {
+                        faces += 1;
+                    }
+                } else if key == to_key {
+                    needs_merge = true;
+                }
+            }
+        }
+    }
+    let block = if matched == 0 {
+        Some("No person by that name")
+    } else if faces == 0 {
+        Some("That is already their name")
+    } else {
+        None
+    };
+    // a case-only change is the same person, not a merge
+    PersonRenamePlan { faces, needs_merge: needs_merge && from_key != to_key, block }
 }
 
 /// A dialog's one text field: it keeps the focus (except while its own menu has it) and opens

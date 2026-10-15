@@ -1,5 +1,10 @@
 # Sony embedded distortion corrections
 
+The **ILCE-7RM6** (A7R VI) has its own conversion, with other conventions measured against its camera JPEGs:
+[Sony ARW lens corrections](sony-ilce7rm6-lens-corrections.md). On ILCE-7RM6 photos the formula below misses the 24–70 GM II by
+up to 1.43 px at 1440 px while fitting the 100 mm and 200–600 better, and no single unit fits every lens under either
+convention; that page's *Two conventions* section has the comparison and what would settle it.
+
 LightCraft reads the signed 16-sample distortion table in the raw image IFD (`0x7037`) of
 Sony **ILCE-7RM4A (A7R IVA)** Bayer ARWs. Other camera models are deliberately left uncorrected,
 even when they contain a table with the same layout.

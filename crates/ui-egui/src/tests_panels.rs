@@ -2365,3 +2365,30 @@ fn new_album_can_leave_the_selected_photos_out() {
     confirm(&mut h);
     assert!(photos(&h, "Nothing").is_empty());
 }
+
+/// Histogram corner controls stay usable even before a histogram is available, and each
+/// click invokes the same clipping-warning command as the J shortcut exactly once.
+#[test]
+fn histogram_corners_toggle_clipping_warnings() {
+    let mut h = demo([1400.0, 1000.0], json!({"view": "detail", "right": "edit"}));
+    for texture in h.app.renderer.textures.values_mut() {
+        texture.histogram = None;
+    }
+    h.step();
+    h.app.ui.show_clipping = false;
+    let histogram = h.app.widgets.iter().find(|(id, _)| id == "histogram").unwrap().1;
+    for id in ["histogram:shadows", "histogram:highlights"] {
+        let rect = h.app.widgets.iter().find(|(widget, _)| widget == id).unwrap().1;
+        assert!(histogram.shrink(8.0).contains_rect(rect), "{id} keeps clear space to the histogram edges: {rect:?} in {histogram:?}");
+    }
+    for (id, enabled) in [("histogram:shadows", true), ("histogram:highlights", false), ("histogram", true)] {
+        let r = h.request("ui.clickWidget", json!({"id": id}), T);
+        assert_eq!(r["ok"], true, "{r}");
+        h.step();
+        assert_eq!(h.app.ui.show_clipping, enabled, "{id} must toggle exactly once");
+    }
+    let r = h.request("ui.key", json!({"key": "J"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.step();
+    assert!(!h.app.ui.show_clipping);
+}

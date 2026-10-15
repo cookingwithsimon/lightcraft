@@ -162,6 +162,29 @@ pub enum Conflict {
     Skip,
 }
 
+/// Where a batch's files go (Lightroom Classic's Export To).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DestinationMode {
+    /// One folder for the whole batch ([`Destination::dir`]).
+    #[default]
+    SpecificFolder,
+    /// Each photo's own folder: the folder its original is in. A photo without one on disk (a
+    /// demo photo, a photo in the browser's storage) or whose folder is gone gets an error.
+    SameAsOriginal,
+}
+
+impl DestinationMode {
+    /// `specificFolder` / `sameAsOriginal` (any case).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "specificfolder" => Some(Self::SpecificFolder),
+            "sameasoriginal" => Some(Self::SameAsOriginal),
+            _ => None,
+        }
+    }
+}
+
 /// A named set of `app.export` params.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExportPreset {
@@ -293,58 +316,8 @@ fn turn(turns: u8, x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
     }
 }
 
-/// Inter SemiBold (OFL, see assets/ATTRIBUTION.md).
-static WATERMARK_FONT: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
-
-/// The watermark faces: Inter first, then the craft-fonts CJK faces (Mincho first, the watermark's
-/// serif look; then any other CJK face — a watermark has no UI language, so every CJK script is
-/// offered). Without craft-fonts that is Inter alone, and CJK characters draw as Inter's
-/// missing-glyph box.
-fn watermark_fonts(craft: &'static [crate::fonts::CraftFont]) -> Vec<ab_glyph::FontRef<'static>> {
-    let mut cjk: Vec<_> = crate::fonts::cjk(craft).collect();
-    cjk.sort_by_key(|f| !f.is_mincho());
-    std::iter::once(WATERMARK_FONT)
-        .chain(cjk.into_iter().map(|f| f.bytes))
-        .filter_map(|bytes| ab_glyph::FontRef::try_from_slice(bytes).ok())
-        .collect()
-}
-
-/// Shape a whole grapheme in one cell. CJK uses vertical origins and forms; Latin stays upright.
-/// Unlike Unicode presentation-form characters, GSUB works with BIZ UD fonts too.
-fn watermark_cell_glyphs(
-    font: &ab_glyph::FontRef<'_>,
-    data: &harfrust::ShaperData,
-    text: &str,
-    vertical: bool,
-    px: f32,
-    left: f32,
-    top: f32,
-) -> Option<Vec<ab_glyph::Glyph>> {
-    use ab_glyph::{Font, ScaleFont};
-    let face = harfrust::FontRef::new(font.font_data()).ok()?;
-    let mut buf = harfrust::UnicodeBuffer::new();
-    buf.push_str(text);
-    buf.set_direction(if vertical { harfrust::Direction::TopToBottom } else { harfrust::Direction::LeftToRight });
-    buf.guess_segment_properties();
-    let shaped = data.shaper(&face).build().shape(buf, harfrust::ShapeOptions::new());
-    if shaped.glyph_infos().is_empty() {
-        return None;
-    }
-    let sf = font.as_scaled(px);
-    let (sx, sy) = (sf.h_scale_factor(), sf.v_scale_factor());
-    let advance_x = shaped.glyph_positions().iter().map(|p| p.x_advance as f32 * sx).sum::<f32>();
-    let advance_y = shaped.glyph_positions().iter().map(|p| -(p.y_advance as f32) * sy).sum::<f32>();
-    let (mut x, mut y) = if vertical { (left + px / 2.0, top + (px - advance_y) / 2.0) } else { (left + (px - advance_x) / 2.0, top + sf.ascent()) };
-    let mut glyphs = Vec::new();
-    for (info, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
-        let gid = u16::try_from(info.glyph_id).ok().filter(|g| *g != 0)?;
-        let pen = ab_glyph::point(x + pos.x_offset as f32 * sx, y - pos.y_offset as f32 * sy);
-        glyphs.push(ab_glyph::GlyphId(gid).with_scale_and_position(px, pen));
-        x += pos.x_advance as f32 * sx;
-        y -= pos.y_advance as f32 * sy;
-    }
-    Some(glyphs)
-}
+#[cfg(test)]
+use crate::text::{TEXT_FONT as WATERMARK_FONT, cell_glyphs as watermark_cell_glyphs, faces as watermark_fonts};
 
 /// Draw `wm` onto `img` (straight alpha blending of the encoded values).
 pub fn draw_watermark(img: &mut Rgba8, wm: &Watermark) {
@@ -365,6 +338,23 @@ fn blend_watermark(img: &mut Rgba8, wm: &Watermark, floor_scale: f32) {
         let p = &mut img.data[y * width + x];
         for c in 0..3 {
             p[c] = (p[c] as f32 + (col[c] as f32 - p[c] as f32) * k).round() as u8;
+        }
+    });
+}
+
+/// Draw `wm` into the `w × h` area of `img` whose top-left corner is (`x0`, `y0`), sized and
+/// anchored as on an image of that size (a slideshow slide's photo). The area is clipped to `img`.
+pub fn draw_watermark_in(img: &mut Rgba8, wm: &Watermark, x0: usize, y0: usize, w: usize, h: usize) {
+    let (width, height) = (img.width, img.height);
+    watermark_coverage(w, h, wm, crate::fonts::CRAFT_FONTS, 1.0, |x, y, k, col| {
+        let (px, py) = (x0.saturating_add(x), y0.saturating_add(y));
+        if px >= width || py >= height {
+            return;
+        }
+        if let Some(p) = img.data.get_mut(py * width + px) {
+            for c in 0..3 {
+                p[c] = (p[c] as f32 + (col[c] as f32 - p[c] as f32) * k).round() as u8;
+            }
         }
     });
 }
@@ -403,7 +393,6 @@ fn watermark_coverage(
     floor_scale: f32,
     mut blend_px: impl FnMut(usize, usize, f32, [u8; 3]),
 ) {
-    use ab_glyph::{Font, PxScale, ScaleFont, point};
     if !wm.image.trim().is_empty() {
         logo_coverage(width, height, wm, blend_px);
         return;
@@ -412,97 +401,10 @@ fn watermark_coverage(
     if text.is_empty() || width == 0 || height == 0 {
         return;
     }
-    let fonts = watermark_fonts(craft);
-    let Some(latin) = fonts.first() else { return };
-    let vertical_data: Vec<_> = if wm.vertical {
-        fonts.iter().map(|font| harfrust::FontRef::new(font.font_data()).ok().map(|face| harfrust::ShaperData::new(&face))).collect()
-    } else {
-        Vec::new()
-    };
     let short = width.min(height) as f32;
     let px = (wm.size.clamp(0.005, 0.5) * short).max(6.0 * floor_scale);
-    let mut glyphs = Vec::new();
-    let mut x = 0.0f32;
-    let mut y = 0.0f32;
-    let mut tw = 0.0f32;
-    let mut prev = None;
-    let columns = text.split('\n').count();
-    let mut column = 0usize;
-    use unicode_segmentation::UnicodeSegmentation;
-    // Horizontal watermarks retain scalar layout and kerning; only vertical cells use graphemes.
-    let cells: Box<dyn Iterator<Item = &str>> =
-        if wm.vertical { Box::new(text.graphemes(true)) } else { Box::new(text.char_indices().filter_map(|(i, c)| text.get(i..i + c.len_utf8()))) };
-    for cell in cells {
-        let Some(original) = cell.chars().next() else { continue };
-        if cell == "\n" || (wm.vertical && cell == "\r\n") {
-            if wm.vertical {
-                column = column.saturating_add(1);
-                tw = tw.max(y);
-                y = 0.0;
-            } else {
-                tw = tw.max(x);
-                x = 0.0;
-                y += px;
-            }
-            prev = None;
-            continue;
-        }
-        let cjk = matches!(original as u32, 0x3000..=0x30FF | 0x3400..=0x9FFF | 0xFF01..=0xFF60);
-        if wm.vertical && (cjk || cell.chars().count() > 1) {
-            let left = columns.saturating_sub(column.saturating_add(1)) as f32 * px;
-            let shaped = fonts.iter().zip(&vertical_data).enumerate().find_map(|(face, (font, data))| {
-                let data = data.as_ref()?;
-                let cluster = watermark_cell_glyphs(font, data, cell, cjk, px, left, y)?;
-                let substituted = cluster.len() != 1 || cluster.first().is_some_and(|g| g.id != font.glyph_id(original));
-                if cjk && !substituted && matches!(original, '、' | '。' | 'ー' | '（' | '）' | '「' | '」' | '『' | '』' | '【' | '】') {
-                    return None;
-                }
-                Some((face, cluster))
-            });
-            if let Some((face, cluster)) = shaped {
-                glyphs.extend(cluster.into_iter().map(|g| (face, g, None)));
-                y += px;
-                continue;
-            }
-        }
-        let vertical_form = match original {
-            '、' => '︑',
-            '。' => '︒',
-            '（' => '︵',
-            '）' => '︶',
-            '「' => '﹁',
-            '」' => '﹂',
-            '『' => '﹃',
-            '』' => '﹄',
-            '【' => '︻',
-            '】' => '︼',
-            '…' => '︙',
-            other => other,
-        };
-        let has = |font: &ab_glyph::FontRef<'_>, c: char| font.glyph_id(c).0 != 0;
-        let ch = if wm.vertical && fonts.iter().skip(1).any(|f| has(f, vertical_form)) { vertical_form } else { original };
-        // The first face with the glyph; Inter (its missing-glyph box) when none has it.
-        let face = fonts.iter().position(|f| has(f, ch)).unwrap_or(0);
-        let sf = fonts.get(face).unwrap_or(latin).as_scaled(PxScale::from(px));
-        let id = sf.glyph_id(ch);
-        if wm.vertical {
-            let left = columns.saturating_sub(column.saturating_add(1)) as f32 * px;
-            let pen = point(left + (px - sf.h_advance(id)) / 2.0, y + sf.ascent());
-            let rotation = matches!(original, 'ー' | '—' | '–').then_some((left + px / 2.0, y + px / 2.0));
-            glyphs.push((face, id.with_scale_and_position(px, pen), rotation));
-            y += px;
-        } else {
-            if let Some((previous_face, previous)) = prev
-                && previous_face == face
-            {
-                x += sf.kern(previous, id);
-            }
-            glyphs.push((face, id.with_scale_and_position(px, point(x, y + sf.ascent())), None));
-            x += sf.h_advance(id);
-            prev = Some((face, id));
-        }
-    }
-    let (tw, th) = if wm.vertical { (columns as f32 * px, tw.max(y)) } else { (tw.max(x), y + px) };
+    let Some(layout) = crate::text::TextLayout::new(text, px, wm.vertical, craft) else { return };
+    let (tw, th) = (layout.width, layout.height);
     // laid out unturned in a tw × th box, placed by the box it becomes
     let turns = wm.quarter_turns();
     let (bw, bh) = if turns % 2 == 1 { (th, tw) } else { (tw, th) };
@@ -520,35 +422,29 @@ fn watermark_coverage(
         BottomLeft | Bottom | BottomRight => h - iy - bh,
     };
     let alpha = wm.opacity.clamp(0.0, 1.0);
-    let mut blend = |gx: i32, gy: i32, cov: f32, col: [u8; 3], a: f32| {
-        if gx < 0 || gy < 0 || gx >= width as i32 || gy >= height as i32 {
-            return;
-        }
-        blend_px(gx as usize, gy as usize, (cov * a).clamp(0.0, 1.0), col);
-    };
     let passes: &[(f32, [u8; 3], f32)] =
         if wm.shadow { &[((px * 0.05).max(floor_scale), [0, 0, 0], 0.45), (0.0, wm.color, 1.0)] } else { &[(0.0, wm.color, 1.0)] };
     for &(off, col, a) in passes {
-        for (face, g, rotation) in &glyphs {
-            if let Some(o) = fonts.get(*face).and_then(|font| font.outline_glyph(g.clone())) {
-                let b = o.px_bounds();
-                o.draw(|gx, gy, cov| {
-                    let (sx, sy) = (b.min.x + gx as f32, b.min.y + gy as f32);
-                    let (sx, sy) = match rotation {
-                        Some((cx, cy)) => (cx - (sy - cy), cy + (sx - cx)),
-                        None => (sx, sy),
-                    };
-                    // turned with the box; the shadow still falls down and to the right
-                    let (sx, sy) = turn(turns, sx, sy, tw, th);
-                    blend((ox + off + sx) as i32, (oy + off + sy) as i32, cov, col, a * alpha);
-                });
+        let mut put = |gx: i32, gy: i32, cov: f32| {
+            if gx < 0 || gy < 0 || gx >= width as i32 || gy >= height as i32 {
+                return;
             }
+            blend_px(gx as usize, gy as usize, (cov * a * alpha).clamp(0.0, 1.0), col);
+        };
+        if turns == 0 {
+            layout.draw_in(ox + off, oy + off, w, h, &mut put);
+        } else {
+            // turned with the box; the shadow still falls down and to the right
+            layout.draw_points(|x, y, cov| {
+                let (x, y) = turn(turns, x, y, tw, th);
+                put((ox + off + x) as i32, (oy + off + y) as i32, cov);
+            });
         }
     }
 }
 
 /// A watermark graphic, decoded once per file (and again when the file changes).
-fn watermark_logo(path: &str) -> Option<std::sync::Arc<Rgba8>> {
+pub(crate) fn watermark_logo(path: &str) -> Option<std::sync::Arc<Rgba8>> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     static CACHE: Mutex<Option<HashMap<String, (std::time::SystemTime, Arc<Rgba8>)>>> = Mutex::new(None);
@@ -560,10 +456,17 @@ fn watermark_logo(path: &str) -> Option<std::sync::Arc<Rgba8>> {
     {
         return Some(img.clone());
     }
-    let bytes = std::fs::read(path).ok()?;
-    let img = Arc::new(lightcraft_codecs::decode(&bytes, Default::default()).ok()?.to_srgb8());
+    let img = Arc::new(read_graphic(path).ok()?);
     map.insert(path.to_string(), (modified, img.clone()));
     Some(img)
+}
+
+/// A graphic file (a PNG with transparency, typically) as 8-bit sRGB with its alpha: the
+/// watermark logo, the loupe's layout image. The error says why it couldn't be read or decoded.
+pub fn read_graphic(path: &str) -> Result<Rgba8, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("can't read {path}: {e}"))?;
+    let decoded = lightcraft_codecs::decode(&bytes, Default::default()).map_err(|e| format!("can't decode {path}: {e}"))?;
+    Ok(decoded.to_srgb8())
 }
 
 /// The graphic watermark: scaled (premultiplied, so transparent edges stay clean) to
@@ -682,6 +585,8 @@ pub struct ExportOptions {
     pub naming: String,
     /// First `{seq}` value.
     pub start_number: u32,
+    /// A specific folder for the whole batch, or each photo's own folder.
+    pub destination_mode: DestinationMode,
     /// Created inside the destination folder (empty = none).
     pub subfolder: String,
     /// When a file of the same name exists in the destination folder.
@@ -734,6 +639,7 @@ impl Default for ExportOptions {
             sharpen_amount: SharpenAmount::Standard,
             naming: "{name}".into(),
             start_number: 1,
+            destination_mode: DestinationMode::SpecificFolder,
             subfolder: String::new(),
             conflict: Conflict::Unique,
             tiff_compression: TiffCompression::Deflate,
@@ -776,6 +682,7 @@ pub const OPTION_PARAMS: &[&str] = &[
     "sharpenAmount",
     "naming",
     "startNumber",
+    "destinationMode",
     "subfolder",
     "conflict",
     "tiffCompression",
@@ -966,11 +873,12 @@ impl ExportOptions {
                 "sharpenAmount" => one_of(k, v, &["low", "standard", "high"])?,
                 "hdrTransfer" => one_of(k, v, &["pq", "hlg"])?,
                 "conflict" => one_of(k, v, &["unique", "overwrite", "skip"])?,
+                "destinationMode" => one_of(k, v, &["specificFolder", "sameAsOriginal"])?,
                 "tiffCompression" => one_of(k, v, &["none", "lzw", "zip", "deflate"])?,
                 "jxlEffort" => one_of(k, v, &["fast", "normal"])?,
                 "dngCompression" => {
                     serde_json::from_value::<DngCompression>(v.clone())
-                        .map_err(|_| bad(format!("`{k}` must be one of lossless|deflate|uncompressed")))?;
+                        .map_err(|_| bad(format!("`{k}` must be one of lossless|deflate|uncompressed|lossy")))?;
                 }
                 "metadata" => one_of(k, v, &["all", "allExceptCamera", "copyright", "none"])?,
                 "colorSpace" => {
@@ -995,7 +903,7 @@ impl ExportOptions {
     }
 
     /// A `watermark` value: text, or an object of [`WATERMARK_PARAMS`] (issue #183).
-    fn validate_watermark(cmd: &str, v: &serde_json::Value) -> crate::Result<()> {
+    pub(crate) fn validate_watermark(cmd: &str, v: &serde_json::Value) -> crate::Result<()> {
         use serde_json::Value;
         let bad = |msg: String| crate::cmd::bad(cmd, msg);
         let obj = match v {
@@ -1078,6 +986,7 @@ impl ExportOptions {
             sharpen_amount: enm(p, "sharpenAmount").unwrap_or(d.sharpen_amount),
             naming: s("naming").map_or(d.naming, str::to_string),
             start_number: u("startNumber").map_or(d.start_number, |v| v.min(999_999) as u32),
+            destination_mode: s("destinationMode").and_then(DestinationMode::parse).unwrap_or(d.destination_mode),
             subfolder: s("subfolder").map_or(d.subfolder, |v| v.trim().replace(['\\', ':', '\0'], "_")),
             conflict: enm(p, "conflict").unwrap_or(d.conflict),
             tiff_compression: match s("tiffCompression").map(str::to_ascii_lowercase).as_deref() {
@@ -1608,6 +1517,9 @@ pub fn export_photo(session: &mut crate::Session, id: lightcraft_catalog::PhotoI
 pub struct PreparedExport {
     pub photo: lightcraft_catalog::PhotoId,
     pub file_name: String,
+    /// The folder of the photo's original on disk ([`DestinationMode::SameAsOriginal`]); `None`
+    /// for a demo photo or one in the browser's storage.
+    pub source_dir: Option<String>,
     work: Work,
     /// The library's originals, which [`run_batch`] never writes over (shared by a batch).
     guard: std::sync::Arc<crate::originals::OriginalGuard>,
@@ -1633,6 +1545,9 @@ enum Work {
         read: Option<crate::merge::ByteReader>,
         packet: String,
         dng: Option<DngCompression>,
+        /// Lossy DNG: JPEG quality and the long edge to scale to (`None`: full size).
+        quality: u8,
+        lossy_edge: Option<u32>,
         /// The original must not carry a location ([`removes_location`]).
         remove_location: bool,
         label: String,
@@ -1667,6 +1582,7 @@ fn prepare_guarded(
 ) -> Result<PreparedExport, String> {
     let p = session.catalog.photo(id).ok_or("no such photo")?;
     let file_name = o.file_name_for(p, seq);
+    let source_dir = original_folder(&p.source);
     // HDR output only for photos edited in HDR; the rest of the batch exports as usual
     let sdr_opts;
     let o = if o.hdr && !p.develop.hdr.enabled {
@@ -1702,13 +1618,29 @@ fn prepare_guarded(
             read: session.media.file_bytes.clone(),
             packet: crate::sidecar::sidecar_packet_with(p, &session.catalog, removes_location(p, &session.catalog, o)),
             dng,
+            quality: o.quality,
+            lossy_edge: o.resize.is_some().then(|| {
+                let (w, h) = output_size(p, o);
+                u32::try_from(w.max(h)).unwrap_or(u32::MAX)
+            }),
             remove_location: removes_location(p, &session.catalog, o),
             label: p.file_name.clone(),
             size: (p.width as usize, p.height as usize),
         };
         (work, weight)
     };
-    Ok(PreparedExport { photo: id, file_name, work, guard, weight })
+    Ok(PreparedExport { photo: id, file_name, source_dir, work, guard, weight })
+}
+
+/// The folder a photo's original is in, for [`DestinationMode::SameAsOriginal`]. None for a demo
+/// photo, and on the web, where an original lives in the browser's storage, not in a folder.
+fn original_folder(source: &lightcraft_catalog::Source) -> Option<String> {
+    let lightcraft_catalog::Source::File { path } = source else { return None };
+    if cfg!(target_arch = "wasm32") {
+        return None;
+    }
+    let dir = std::path::Path::new(path).parent()?.to_string_lossy().to_string();
+    (!dir.is_empty()).then_some(dir)
 }
 
 /// Why an export of `out` pixels (`w`, `h`), from a photo of `native_px` pixels at its own size,
@@ -1761,7 +1693,7 @@ impl PreparedExport {
                 };
                 Ok(Exported { file_name, bytes, width: r.image.width, height: r.image.height, sidecars: Vec::new(), gpu_fallback })
             }
-            Work::File { path, read, packet, dng, label, size, remove_location } => {
+            Work::File { path, read, packet, dng, quality, lossy_edge, label, size, remove_location } => {
                 let bytes = match &read {
                     Some(r) => r(&path)?,
                     None => std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?,
@@ -1785,12 +1717,16 @@ impl PreparedExport {
                 if lightcraft_raw::probe(&bytes).is_none() {
                     return Err(format!("{label}: DNG export needs a raw photo"));
                 }
-                let raw = lightcraft_raw::decode(&bytes).map_err(|e| format!("{label}: {e}"))?;
+                let mut raw = lightcraft_raw::decode(&bytes).map_err(|e| format!("{label}: {e}"))?;
+                crate::camera_preview::with_starting_colour(&mut raw, &bytes);
                 drop(bytes);
                 let compression = match dng {
                     DngCompression::Lossless => lightcraft_raw::DngCompression::Lj92 { tile: 256 },
                     DngCompression::Deflate => lightcraft_raw::DngCompression::Deflate { tile: 256, half: false },
                     DngCompression::Uncompressed => lightcraft_raw::DngCompression::Uncompressed,
+                    DngCompression::Lossy => {
+                        lightcraft_raw::DngCompression::LossyJpeg { tile: 256, quality: quality.clamp(1, 100), long_edge: lossy_edge }
+                    }
                 };
                 let dng = lightcraft_raw::write_dng(&raw, &lightcraft_raw::DngWriteOptions { xmp: Some(packet), compression, ..Default::default() })
                     .map_err(|e| e.to_string())?;
@@ -1810,11 +1746,15 @@ pub enum DngCompression {
     /// Deflate (zip) tiles with prediction.
     Deflate,
     Uncompressed,
+    /// Lossy DNG: demosaiced linear data as JPEG tiles at the export quality, scaled to the resize
+    /// setting when there is one (Lightroom's "Use Lossy Compression").
+    Lossy,
 }
 
 /// The destination of a batch: a folder (with `ExportOptions::subfolder` and the conflict policy
-/// applied to each file together with its sidecars), or one exact file path (single photo; an
-/// ordinary file already there is replaced). Either way a catalogued original (or its sidecar)
+/// applied to each file together with its sidecars; with [`DestinationMode::SameAsOriginal`] each
+/// photo's own folder instead of `dir`), or one exact file path (single photo; an ordinary file
+/// already there is replaced). Either way a catalogued original (or its sidecar)
 /// is never written over: see [`crate::originals`].
 #[derive(Clone, Debug, Default)]
 pub struct Destination {
@@ -2011,12 +1951,12 @@ fn run_batch_with(
             if !progress(i, &item.file_name) {
                 break;
             }
-            let (photo, name, guard) = (item.photo, item.file_name.clone(), item.guard.clone());
-            placer.place(photo, name, &guard, run_gated(item))?;
+            let (photo, name, guard, source_dir) = (item.photo, item.file_name.clone(), item.guard.clone(), item.source_dir.clone());
+            placer.place(photo, name, source_dir.as_deref(), &guard, run_gated(item))?;
         }
         return Ok(std::mem::take(&mut placer.out));
     }
-    let heads: Vec<_> = items.iter().map(|i| (i.photo, i.file_name.clone(), i.guard.clone())).collect();
+    let heads: Vec<_> = items.iter().map(|i| (i.photo, i.file_name.clone(), i.guard.clone(), i.source_dir.clone())).collect();
     let queue = Queue {
         lane: std::sync::Mutex::new(Lane { items: items.into_iter().map(Some).collect(), next: 0, placed: 0, stop: false, done: Default::default() }),
         cv: std::sync::Condvar::new(),
@@ -2031,12 +1971,12 @@ fn run_batch_with(
             }
         }
         let placed = || {
-            for (i, (photo, name, guard)) in heads.into_iter().enumerate() {
+            for (i, (photo, name, guard, source_dir)) in heads.into_iter().enumerate() {
                 if !progress(i, &name) {
                     break;
                 }
                 let e = queue.result(i);
-                placer.place(photo, name, &guard, e)?;
+                placer.place(photo, name, source_dir.as_deref(), &guard, e)?;
             }
             Ok::<_, String>(())
         };
@@ -2147,12 +2087,11 @@ impl Queue {
     }
 }
 
-/// Where a batch's files go: each photo's path (subfolder, conflict policy, sidecars, never an
-/// original) and its write, in batch order.
+/// Where a batch's files go: each photo's path (destination folder, subfolder, conflict policy,
+/// sidecars, never an original) and its write, in batch order.
 struct Placer<'a> {
     o: &'a ExportOptions,
     to: &'a Destination,
-    dir: String,
     single: bool,
     taken: std::collections::HashSet<String>,
     out: Vec<serde_json::Value>,
@@ -2173,29 +2112,53 @@ impl<'a> Placer<'a> {
         exists: &'a dyn Fn(&str) -> bool,
         stop_on_error: bool,
     ) -> Placer<'a> {
-        let dir = if o.subfolder.is_empty() { to.dir.clone() } else { join_path(&to.dir, &o.subfolder) };
-        Placer { o, to, dir, single: false, taken: Default::default(), out: Vec::new(), write, exists, stop_on_error }
+        Placer { o, to, single: false, taken: Default::default(), out: Vec::new(), write, exists, stop_on_error }
     }
 
-    /// Place photo `photo`'s export result (file `name`): write it and record the outcome. `Err`
-    /// only when it failed and `stop_on_error` is set.
+    /// The folder photo `name` (its original in `source_dir`) is written to: the batch's folder or
+    /// the photo's own ([`DestinationMode`]), plus the subfolder. An error for a photo with no
+    /// folder of its own, or whose folder is gone: never a file written somewhere else instead.
+    fn folder_for(&self, name: &str, source_dir: Option<&str>) -> Result<String, String> {
+        let base = match self.o.destination_mode {
+            DestinationMode::SpecificFolder => self.to.dir.clone(),
+            DestinationMode::SameAsOriginal => {
+                let Some(d) = source_dir else {
+                    return Err(format!(
+                        "{name}: the photo has no folder on disk (a demo photo or one in the browser's storage), so it can't be exported to the same folder as its original; choose a specific folder"
+                    ));
+                };
+                if !(self.exists)(d) {
+                    return Err(format!("{name}: the original's folder is missing ({d}); reconnect it or choose a specific folder"));
+                }
+                d.to_string()
+            }
+        };
+        Ok(if self.o.subfolder.is_empty() { base } else { join_path(&base, &self.o.subfolder) })
+    }
+
+    /// Place photo `photo`'s export result (file `name`, its original in `source_dir`): write it
+    /// and record the outcome. `Err` only when it failed and `stop_on_error` is set.
     fn place(
         &mut self,
         photo: lightcraft_catalog::PhotoId,
         name: String,
+        source_dir: Option<&str>,
         guard: &crate::originals::OriginalGuard,
         e: Result<Exported, String>,
     ) -> Result<(), String> {
         use serde_json::json;
-        let (o, dir, exists) = (self.o, &self.dir, self.exists);
-        let e = match e {
-            Ok(e) => e,
+        // an exact file path needs no folder
+        let dir = if self.to.exact.is_some() && self.single { Ok(String::new()) } else { self.folder_for(&name, source_dir) };
+        let (o, exists) = (self.o, self.exists);
+        let (dir, e) = match dir.and_then(|dir| e.map(|e| (dir, e))) {
+            Ok(v) => v,
             Err(err) if self.stop_on_error => return Err(err),
             Err(err) => {
                 self.out.push(json!({"photo": photo.0, "file": name, "error": err}));
                 return Ok(());
             }
         };
+        let dir = dir.as_str();
         // the exported file and its sidecars
         let group = |main: &str| std::iter::once(main.to_string()).chain(e.sidecars.iter().map(|(x, _)| sidecar_path(main, x))).collect::<Vec<_>>();
         let path = match self.to.exact.as_deref().filter(|_| self.single) {
@@ -3188,6 +3151,35 @@ mod tests {
         assert_eq!(ExportOptions::from_params(&ExportOptions::default().to_json()).unwrap(), ExportOptions::default());
         // null is "not given", as a dropped key is
         ExportOptions::from_params(&json!({"quality": 92, "longEdge": null, "watermark": null})).unwrap();
+    }
+
+    /// Issue #956: `destinationMode` picks a specific folder (the default) or each photo's own
+    /// folder; it is checked like the other params and kept in presets and Export with Previous.
+    #[test]
+    fn destination_mode_param() {
+        use serde_json::json;
+        assert_eq!(ExportOptions::default().destination_mode, DestinationMode::SpecificFolder);
+        for (v, want) in [
+            ("sameAsOriginal", DestinationMode::SameAsOriginal),
+            ("SameAsOriginal", DestinationMode::SameAsOriginal),
+            ("specificFolder", DestinationMode::SpecificFolder),
+        ] {
+            assert_eq!(ExportOptions::from_params(&json!({"destinationMode": v})).unwrap().destination_mode, want, "{v}");
+        }
+        let e = ExportOptions::from_params(&json!({"destinationMode": "nextToIt"})).unwrap_err().to_string();
+        assert!(e.contains("`destinationMode` must be one of specificFolder|sameAsOriginal"), "{e}");
+        assert!(ExportOptions::from_params(&json!({"destinationMode": 1})).is_err());
+        assert!(
+            ExportOptions::from_params(&json!({"destinationMod": "sameAsOriginal"}))
+                .unwrap_err()
+                .to_string()
+                .contains("did you mean `destinationMode`")
+        );
+        // saved (a preset, `lastExport`) and read back
+        let o = ExportOptions { destination_mode: DestinationMode::SameAsOriginal, subfolder: "Exports".into(), ..Default::default() };
+        let j = o.to_json();
+        assert_eq!(j["destinationMode"], "sameAsOriginal");
+        assert_eq!(ExportOptions::from_params(&ExportOptions::known_keys_only(&j)).unwrap(), o);
     }
 
     /// Issue #183: the `watermark` object's keys, kinds and ranges are checked (and documented in

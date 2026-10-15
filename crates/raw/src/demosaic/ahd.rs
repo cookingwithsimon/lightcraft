@@ -19,20 +19,21 @@ const MARGIN: usize = 6;
 
 pub(crate) fn ahd(m: &Mosaic) -> Rgb32f {
     let (w, h) = (m.w, m.h);
-    let tiles: Vec<(usize, usize)> = (0..h.div_ceil(TILE)).flat_map(|ty| (0..w.div_ceil(TILE)).map(move |tx| (tx * TILE, ty * TILE))).collect();
-    let results: Vec<(usize, usize, usize, usize, Vec<[f32; 3]>)> = tiles
-        .par_iter()
-        .map(|&(x0, y0)| {
-            let (tw, th) = (TILE.min(w - x0), TILE.min(h - y0));
-            (x0, y0, tw, th, tile(m, x0, y0, tw, th))
-        })
-        .collect();
     let mut out = Rgb32f::new(w, h);
-    for (x0, y0, tw, th, px) in results {
-        for y in 0..th {
-            out.data[(y0 + y) * w + x0..(y0 + y) * w + x0 + tw].copy_from_slice(&px[y * tw..(y + 1) * tw]);
-        }
+    if w == 0 || h == 0 {
+        return out;
     }
+    // one row of tiles per task, written straight into the picture (collecting the tiles first held a second copy)
+    out.data.par_chunks_mut(w * TILE).enumerate().for_each(|(ty, band)| {
+        let (y0, th) = (ty * TILE, band.len() / w);
+        for x0 in (0..w).step_by(TILE) {
+            let tw = TILE.min(w - x0);
+            let px = tile(m, x0, y0, tw, th);
+            for y in 0..th {
+                band[y * w + x0..y * w + x0 + tw].copy_from_slice(&px[y * tw..(y + 1) * tw]);
+            }
+        }
+    });
     out
 }
 

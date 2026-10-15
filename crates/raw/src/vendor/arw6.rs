@@ -524,10 +524,10 @@ pub(crate) fn decode(strip: &[u8], width: usize, height: usize, mode: crate::Mod
         }
         return Ok(Vec::new());
     }
-    let decoded: Vec<Result<Vec<u16>>> = tiles.par_iter().enumerate().map(|(i, t)| decode_tile(bytes(i)?, t.width, t.height)).collect();
+    // a tile that fails is reported before the mosaic is allocated (issue #1512)
+    let decoded: Vec<Vec<u16>> = tiles.par_iter().enumerate().map(|(i, t)| decode_tile(bytes(i)?, t.width, t.height)).collect::<Result<_>>()?;
     let mut out = vec![0u16; width.checked_mul(height).ok_or_else(|| corrupt("image size"))?];
     for (t, d) in tiles.iter().zip(decoded) {
-        let d = d?;
         for (r, row) in d.chunks_exact(t.width.max(1)).enumerate() {
             let start = (t.y + r).checked_mul(width).and_then(|a| a.checked_add(t.x)).ok_or_else(|| corrupt("tile placement"))?;
             let dst = start.checked_add(row.len()).and_then(|end| out.get_mut(start..end)).ok_or_else(|| corrupt("tile outside image"))?;

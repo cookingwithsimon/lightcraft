@@ -108,6 +108,18 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             prefs
         ),
+        cmd!(
+            "library.retrySidecars",
+            "Write Waiting XMP Sidecars",
+            [],
+            None,
+            "{} — writes again the automatic XMP sidecars that failed (folder offline, read-only or full) whose originals are reachable now → {written, waiting}",
+            always,
+            |s, _| {
+                let written = s.retry_unsaved_sidecars();
+                Ok(json!({"written": written, "waiting": s.unsaved_sidecars()}))
+            }
+        ),
         cmd!("library.toggleAutoWriteXmp", "Automatically Write Changes into XMP", ["File"], None, "{} → {autoWrite}", always, |s, _| {
             let on = !s.xmp.auto_write;
             prefs(s, &json!({"autoWrite": on}))

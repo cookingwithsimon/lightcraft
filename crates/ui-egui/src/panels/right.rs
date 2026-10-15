@@ -20,10 +20,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             if app.ui.right == RightPanel::Keywords {
                 egui::ScrollArea::vertical().id_salt("right-scroll").auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    header(ui, "Keywords");
-                    padded(ui, |ui| {
-                        ui.label(egui::RichText::new(crate::i18n::tr("Select photos to give them keywords.")).color(t.text_dim));
-                    });
+                    if fold_header(app, ui, "keywording", "Keywords") {
+                        padded(ui, |ui| {
+                            ui.label(egui::RichText::new(crate::i18n::tr("Select photos to give them keywords.")).color(t.text_dim));
+                        });
+                    }
                     super::keyword_list::show(app, ui);
                 });
                 return;
@@ -55,6 +56,36 @@ pub fn header(ui: &mut egui::Ui, title: &str) {
     let t = Tokens::get(ui.ctx());
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
     ui.painter().text(pos2(r.left() + 24.0, r.center().y + 2.0), Align2::LEFT_CENTER, crate::i18n::tr(title), t.semibold(15.0), t.text);
+}
+
+/// A panel title that folds its section shut and open again (`section:{id}`; kept in
+/// [`crate::state::UiState::folded_sections`]). Says whether the section is open.
+pub fn fold_header(app: &mut LightcraftApp, ui: &mut egui::Ui, id: &str, title: &str) -> bool {
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+    let title = crate::i18n::tr(title);
+    fold_title(app, ui, id, r, &resp, title)
+}
+
+/// [`fold_header`] for a title whose room is already taken (`r`, answering as `resp`).
+pub fn fold_title(app: &mut LightcraftApp, ui: &egui::Ui, id: &str, r: Rect, resp: &egui::Response, title: &str) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let open = !app.ui.section_folded(id);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, true, open, title));
+    register(ui.ctx(), format!("section:{id}"), r);
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(r, 0.0, t.chrome.gamma_multiply(1.06));
+    }
+    if resp.has_focus() {
+        p.rect_stroke(r.shrink(2.0), 4.0, egui::Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
+    }
+    p.text(pos2(r.left() + 24.0, r.center().y + 2.0), Align2::LEFT_CENTER, title, t.semibold(15.0), t.text);
+    let chevron = Rect::from_center_size(pos2(r.right() - 30.0, r.center().y + 2.0), vec2(14.0, 14.0));
+    paint(p, chevron, if open { Icon::ChevronDown } else { Icon::ChevronRight }, t.icon);
+    if resp.clicked() {
+        app.ui.toggle_folded(id);
+    }
+    open
 }
 
 pub fn label_row(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -454,11 +485,35 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         app.ui.spots_threshold = v as f32;
     }
     padded(ui, |ui| {
+        tool_overlay_options(app, ui);
+        ui.add_space(4.0);
         if !d.spots.is_empty() && text_button(ui, "removeClear", crate::i18n::tr("Delete all spots"), false).clicked() {
             for i in (0..d.spots.len()).rev() {
                 let _ = app.run("spot.delete", json!({"index": i}));
             }
         }
+    });
+}
+
+/// Tool Overlay: when the spot and mask pins show on the photo (Auto / Always / Selected / Never;
+/// Shift+H steps through them). Remove and Masking panels.
+pub(crate) fn tool_overlay_options(app: &mut LightcraftApp, ui: &mut egui::Ui) {
+    use crate::state::ToolOverlay;
+    let t = Tokens::get(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(crate::i18n::tr("Tool Overlay")).color(t.text_dim));
+        let current = app.ui.tool_overlay;
+        let r = crate::widgets::dropdown(ui, "toolOverlay", crate::i18n::tr(current.label()), t.font(12.5), t.text_label)
+            .on_hover_text(crate::i18n::tr("When pins show on the photo (Shift+H cycles)"));
+        egui::Popup::menu(&r).show(|ui| {
+            for m in ToolOverlay::ALL {
+                let item = ui.selectable_label(m == current, crate::i18n::tr(m.label()));
+                register(ui.ctx(), format!("toolOverlay:{}", m.name()), item.rect);
+                if item.clicked() {
+                    let _ = app.run("view.toolOverlay", json!({"mode": m.name()}));
+                }
+            }
+        });
     });
 }
 
@@ -534,7 +589,9 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         camera_card(ui, &p);
         ui.add_space(6.0);
         if let Some(why) = &p.preview_only {
-            crate::widgets::preview_only_notice(ui, "info", why);
+            if crate::widgets::preview_only_notice(ui, "info", why) {
+                crate::panels::edit::reload_preview_only(app, ui.ctx(), id);
+            }
             ui.add_space(6.0);
         }
         if let Some(name) = &p.copy_name {
@@ -554,6 +611,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         ui.horizontal(|ui| {
             for l in lightcraft_catalog::ColorLabel::ALL {
                 let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                crate::widgets::announce(&resp, crate::i18n::tr(&format!("{l:?}")));
                 let key = format!("{l:?}").to_lowercase();
                 register(ui.ctx(), format!("label:{key}"), r);
                 let on = p.label == Some(l);
@@ -777,7 +835,7 @@ fn human_size(bytes: u64) -> String {
 fn copyright_status(app: &mut LightcraftApp, ui: &mut egui::Ui, current: lightcraft_catalog::CopyrightStatus) {
     let t = Tokens::get(ui.ctx());
     ui.label(egui::RichText::new(crate::i18n::tr("Copyright Status")).size(11.5).color(t.text_dim));
-    let r = egui::ComboBox::from_id_salt("info-copyright-status").selected_text(crate::i18n::tr(current.label())).show_ui(ui, |ui| {
+    let r = crate::widgets::combo_box("info-copyright-status").selected_text(crate::i18n::tr(current.label())).show_ui(ui, |ui| {
         for st in lightcraft_catalog::CopyrightStatus::ALL {
             if ui.selectable_label(st == current, crate::i18n::tr(st.label())).clicked() && st != current {
                 let _ = app.run("photo.setMeta", json!({"copyrightStatus": st.id()}));
@@ -818,27 +876,134 @@ fn keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     if app.session.catalog.photo(id).is_none() {
         return;
     }
-    header(ui, "Keywords");
+    if fold_header(app, ui, "keywording", "Keywords") {
+        keywording(app, ui);
+    }
+    super::keyword_list::show(app, ui);
+}
+
+/// The Keywording box: the field that adds keywords, the selection's keywords, the keyword set,
+/// the painter and the suggestions.
+fn keywording(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     padded(ui, |ui| {
         let kid = egui::Id::new("kw-input");
         let mut text = ui.data_mut(|d| d.get_temp::<String>(kid).unwrap_or_default());
-        let r =
-            crate::text_field::TextField::singleline("field:keyword", &mut text).hint(crate::i18n::tr("Add keyword")).width(f32::INFINITY).show(ui);
+        // the keywords every selected photo has: those only some have are still offered and suggested
+        let selection = app.session.targets(&serde_json::Value::Null);
+        let have: Vec<String> =
+            app.caches.keyword_chips(&app.session.catalog, &selection).iter().filter(|c| c.on_all()).map(|c| c.path.clone()).collect();
+        // while the box has the cursor it offers the library's keywords for what is being typed,
+        // right under itself; it stays for a click on one of them, which takes the cursor away
+        let field = crate::text_field::id("field:keyword");
+        let oid = egui::Id::new("kw-offers");
+        let pass = ui.ctx().cumulative_pass_nr();
+        // (remembered from the last frame: the text the highlight was for and the keyword it was
+        // on, where the offers were drawn, and whether the box was in sight)
+        let (typed_then, at_then, drawn, drawn_pass, hidden): (String, Option<String>, Rect, u64, bool) =
+            ui.data(|d| d.get_temp(oid)).unwrap_or((String::new(), None, Rect::NOTHING, 0, false));
+        let last_frame = drawn_pass.checked_add(1) == Some(pass);
+        let clicking = last_frame
+            && ui.input(|i| (i.pointer.any_down() || i.pointer.any_released()) && i.pointer.interact_pos().is_some_and(|p| drawn.contains(p)));
+        let typed = super::keywording::typing(&text).to_string();
+        // (none while the box is scrolled out of the panel: they would float over what is there)
+        let offers = ((ui.memory(|m| m.has_focus(field)) || clicking) && !(last_frame && hidden))
+            .then(|| app.caches.completions(&app.session.catalog, &have, &typed))
+            .filter(|o| !o.keywords.is_empty() || o.create.is_some());
+        // ↓ / ↑ move through the offers (none is highlighted at first, and ↑ from the first goes
+        // back to none: Return then gives what was typed, as without offers); Return gives the
+        // highlighted one. The highlight is on a keyword, not a line: it stays with it when the
+        // library changes under it, and goes when the keyword does. With Shift or Alt the keys
+        // are the text's own.
+        let mut at = at_then.filter(|k| typed_then == typed && offers.as_ref().is_some_and(|o| o.keywords.contains(k)));
+        let mut picked = None;
+        if let Some(o) = offers.as_ref().filter(|o| !o.keywords.is_empty()) {
+            let pressed = |ui: &mut egui::Ui, key: egui::Key| {
+                ui.input_mut(|i| {
+                    let plain =
+                        |e: &egui::Event| matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. } if *k == key && modifiers.is_none());
+                    let found = i.events.iter().any(plain);
+                    i.events.retain(|e| !plain(e));
+                    found
+                })
+            };
+            let line = at.as_ref().and_then(|k| o.keywords.iter().position(|x| x == k));
+            if pressed(ui, egui::Key::ArrowDown) {
+                let next = line.map_or(0, |a| a.saturating_add(1)).min(o.keywords.len().saturating_sub(1));
+                at = o.keywords.get(next).cloned();
+            } else if pressed(ui, egui::Key::ArrowUp) {
+                at = line.and_then(|a| a.checked_sub(1)).and_then(|a| o.keywords.get(a).cloned());
+            }
+            if let Some(k) = &at
+                && pressed(ui, egui::Key::Enter)
+            {
+                picked = Some(super::keywording::Picked::Keyword(k.clone()));
+            }
+        }
+        // (after an offer was taken the box starts a new edit, empty: Esc has nothing to bring back)
+        // (asked for on the frame before this one only: a box that wasn't drawn then, its panel
+        // switched away, doesn't claim the cursor whenever it is next drawn)
+        let bid = egui::Id::new("kw-begin");
+        let begin = ui.data_mut(|d| d.remove_temp::<u64>(bid)).is_some_and(|asked| asked.checked_add(1) == Some(pass));
+        let r = crate::text_field::TextField::singleline("field:keyword", &mut text)
+            .hint(crate::i18n::tr("Add keyword"))
+            .width(f32::INFINITY)
+            .begin_edit(begin)
+            .show(ui);
+        let in_sight = ui.clip_rect().contains(r.response.rect.center());
+        let mut drawn = Rect::NOTHING;
+        // (what isn't drawn can't be taken: Return on the frame the box scrolls out gives nothing)
+        if !in_sight {
+            picked = None;
+        }
+        if offers.is_none() {
+            // (not over the offers)
+            r.response.clone().on_hover_text(crate::i18n::tr("Separate several keywords with commas. Return gives them to the selected photos."));
+        }
+        if let Some(o) = offers.as_ref().filter(|_| in_sight) {
+            let (clicked, rect) = super::keywording::offers_below(ui, r.response.rect, o, at.as_deref());
+            drawn = rect;
+            picked = picked.or(clicked);
+        }
+        ui.data_mut(|d| d.insert_temp(oid, (typed.clone(), at, drawn, pass, !in_sight)));
         // Return gives the keywords to the selected photos; Esc gives back what was there before
         // this edit (the shared field does)
-        if r.ending == Some(crate::text_field::Ending::Return) && !text.trim().is_empty() {
-            // a new name goes inside the default parent (Put New Keywords Inside This Keyword)
-            let kws: Vec<String> = text.split(',').map(|s| app.session.catalog.typed_keyword(s)).filter(|s| !s.is_empty()).collect();
-            let _ = app.run("photo.setMeta", json!({"addKeywords": kws}));
-            text.clear();
+        let returned = r.ending == Some(crate::text_field::Ending::Return) && !text.trim().is_empty();
+        // a new name goes inside the default parent (Put New Keywords Inside This Keyword)
+        let as_typed = |app: &LightcraftApp, text: &str| -> Vec<String> {
+            text.split(',').map(|s| app.session.catalog.typed_keyword(s)).filter(|s| !s.is_empty()).collect()
+        };
+        let adding: Option<Vec<String>> = match picked {
+            // an offer: it, and the keywords typed before the last comma
+            Some(super::keywording::Picked::Keyword(k)) => {
+                let mut kws = super::keywording::typed_before(&app.session.catalog, &text);
+                kws.push(k);
+                Some(kws)
+            }
+            Some(super::keywording::Picked::Typed) => Some(as_typed(app, &text)),
+            None if returned => Some(as_typed(app, &text)),
+            None => None,
+        };
+        if let Some(kws) = adding {
+            // (refused, the text stays to be put right, and the refusal is said)
+            match app.run("photo.setMeta", json!({"addKeywords": kws})) {
+                Ok(_) => {
+                    text.clear();
+                    // an offer taken leaves the cursor in the box, for the next keyword
+                    if !returned {
+                        ui.data_mut(|d| d.insert_temp(bid, pass));
+                    }
+                }
+                Err(e) => app.toast_error(ui.ctx(), e),
+            }
         }
         ui.data_mut(|d| d.insert_temp(kid, text));
         ui.add_space(8.0);
         super::keywording::view_switch(app, ui);
         ui.add_space(4.0);
+        super::keywording::scope(app, ui, &selection);
         if app.ui.keywording_view == crate::state::KeywordingView::Keywords {
-            super::keywording::chip_row(app, ui);
+            super::keywording::chip_row(app, ui, &selection);
         } else {
             super::keywording::names_row(app, ui);
         }
@@ -871,33 +1036,31 @@ fn keywords(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             }
         });
         ui.add_space(10.0);
-        // suggestions: completions of the typed text, else keywords used together with this
-        // photo's keywords, else the most used ones
-        let typed = ui.data(|d| d.get_temp::<String>(kid).unwrap_or_default());
-        let last = typed.rsplit(',').next().unwrap_or("").trim().to_string();
-        // the keywords every selected photo has: those only some have are still suggested
-        let selection = app.session.targets(&serde_json::Value::Null);
-        let have: Vec<String> =
-            app.caches.keyword_chips(&app.session.catalog, &selection).iter().filter(|c| c.on_all()).map(|c| c.path.clone()).collect();
-        let suggestions = (*app.caches.suggestions(&app.session.catalog, &have, &last, 12)).clone();
+        // suggestions: keywords used together with the selection's keywords, else the most used
+        // ones (what matches the text being typed is offered under the box itself)
+        let suggestions = (*app.caches.suggestions(&app.session.catalog, &have, "", 12)).clone();
         if !suggestions.is_empty() {
             ui.label(egui::RichText::new(crate::i18n::tr("Suggestions")).color(t.text_dim));
+            // grouped: the keyword's own name, its whole path in the tooltip
+            let grouped = app.ui.settings.keyword_chips == crate::state::KeywordChips::Grouped;
+            let names = if grouped { super::keywording::suggestion_names(&suggestions) } else { Vec::new() };
             ui.horizontal_wrapped(|ui| {
-                for k in suggestions {
-                    let r = ui
-                        .add(egui::Button::new(egui::RichText::new(format!("+ {}", k.replace('|', " › "))).color(t.text_label)).corner_radius(10.0));
+                if grouped {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+                }
+                for (i, k) in suggestions.into_iter().enumerate() {
+                    let whole = k.replace('|', " › ");
+                    let name = names.get(i).unwrap_or(&whole);
+                    let r = ui.add(egui::Button::new(egui::RichText::new(format!("+ {name}")).color(t.text_label)).corner_radius(10.0));
+                    let r = if grouped { r.on_hover_text(&whole) } else { r };
                     register(ui.ctx(), format!("kwSuggest:{k}"), r.rect);
                     if r.clicked() {
                         let _ = app.run("photo.setMeta", json!({"addKeywords": [k]}));
-                        if !last.is_empty() {
-                            ui.data_mut(|d| d.insert_temp(kid, String::new()));
-                        }
                     }
                 }
             });
         }
     });
-    super::keyword_list::show(app, ui);
 }
 
 /// The keyword set: pick a set, then nine buttons (⌥1–⌥9) that toggle its keywords on the
@@ -911,7 +1074,7 @@ fn keyword_set(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let current = sets["current"].as_str().unwrap_or_default().to_string();
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(crate::i18n::tr("Keyword Set")).color(t.text_dim));
-        let combo = egui::ComboBox::from_id_salt("kw-set")
+        let combo = crate::widgets::combo_box("kw-set")
             .selected_text(crate::i18n::builtin_label(&current, current == lightcraft_engine::cmd::keywords::RECENT))
             .show_ui(ui, |ui| {
                 for set in sets["sets"].as_array().into_iter().flatten() {
@@ -1030,6 +1193,7 @@ fn versions(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         // newest first
         for (i, v) in shown.into_iter().rev() {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 58.0), Sense::click());
+            crate::widgets::announce(&resp, format!("{} {}", crate::i18n::tr("Version"), i + 1));
             register(ui.ctx(), format!("version:{i}"), r);
             let current = *v.settings == *p.develop;
             if resp.hovered() {
@@ -1136,6 +1300,7 @@ fn activity(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         let cursor = p.history_index();
         for (i, h) in p.history.iter().enumerate().rev() {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+            crate::widgets::announce(&resp, crate::i18n::tr(&h.label));
             register(ui.ctx(), format!("history:{i}"), r);
             let row = history_row(i, cursor);
             if row == HistoryRow::Current {

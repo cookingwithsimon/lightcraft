@@ -47,6 +47,7 @@ pub mod spectral;
 mod tiffraw;
 mod unpack;
 mod vendor;
+mod wb_estimate;
 
 pub use demosaic::{Method, demosaic};
 pub use dngwrite::{DngCompression, DngWriteOptions, write_dng, write_rendered_dng};
@@ -111,6 +112,10 @@ pub enum RawFormat {
     CfaTiff,
     /// Kodak DCS520C TIFF: a two-component lossless JPEG CFA sub-IFD with a response curve (`vendor::kodak`).
     KodakDcs,
+    /// Epson ERF: a CFA sub-IFD of 12-bit samples in 16-byte blocks (`vendor::erf`).
+    Erf,
+    /// Mamiya MEF: an uncompressed 12-bit packed CFA sub-IFD (`vendor::mef`).
+    Mef,
     /// Another TIFF-based raw (3FR, IIQ, ERF, KDC, DCR, MOS, …).
     OtherTiff,
 }
@@ -132,6 +137,8 @@ impl RawFormat {
                 | RawFormat::CfaTiff
                 | RawFormat::Srw
                 | RawFormat::KodakDcs
+                | RawFormat::Erf
+                | RawFormat::Mef
         )
     }
 }
@@ -205,6 +212,12 @@ pub fn probe(bytes: &[u8]) -> Option<RawFormat> {
     }
     if make.starts_with("SAMSUNG") && samsung_raw {
         return Some(RawFormat::Srw);
+    }
+    if vendor::erf::raw_ifd(&t, bytes.len()).is_some() {
+        return Some(RawFormat::Erf);
+    }
+    if vendor::mef::raw_ifd(&t, bytes.len()).is_some() {
+        return Some(RawFormat::Mef);
     }
     if vendor::kodak::raw_ifd(&t, bytes).is_some() {
         return Some(RawFormat::KodakDcs);
@@ -385,6 +398,8 @@ fn decode_with(bytes: &[u8], mode: Mode) -> Result<RawImage> {
         RawFormat::CfaTiff => dng::decode_as(bytes, mode, RawFormat::CfaTiff).map(lift_clipped),
         RawFormat::Srw => vendor::srw::decode(bytes, mode),
         RawFormat::KodakDcs => vendor::kodak::decode(bytes, mode),
+        RawFormat::Erf => vendor::erf::decode(bytes, mode),
+        RawFormat::Mef => vendor::mef::decode(bytes, mode),
         RawFormat::OtherTiff => Err(RawError::Unsupported(other_tiff_reason(bytes))),
         other => Err(RawError::Unsupported(format!("{other:?} files are not decoded yet"))),
     }
@@ -728,7 +743,10 @@ impl RawImage {
             return Err(RawError::Unsupported(format!("CFA pattern {}", c.name())));
         }
         let a = self.active_area;
-        if a.width == 0 || a.height == 0 || a.x + a.width > self.width || a.y + a.height > self.height {
+        // checked: a crop origin from a maker note can be `u64::MAX`, and `x + width` would wrap
+        // back inside the image here and again in `normalized`'s index arithmetic.
+        let fits = |x: usize, len: usize, limit: usize| x.checked_add(len).is_some_and(|end| end <= limit);
+        if a.width == 0 || a.height == 0 || !fits(a.x, a.width, self.width) || !fits(a.y, a.height, self.height) {
             return Err(RawError::Corrupt("active area outside image".into()));
         }
         Ok(())
@@ -876,6 +894,37 @@ mod tests {
         // a crop that pokes out is clipped to the picture
         whole.crop = Rect::new(6, 4, 10, 10);
         assert_eq!(whole.develop_crop(8, 6), Rect::new(6, 4, 2, 2));
+    }
+
+    /// A maker-note crop (`PEF` AOC / `ORF` ImageProcessing) with an origin of `u64::MAX` used to
+    /// pass the bounds check (`x + width` wraps to 0) and then index out of bounds in
+    /// `normalized`. It must be a `Corrupt` error at validate time instead.
+    #[test]
+    fn an_active_area_that_wraps_past_the_image_is_corrupt() {
+        let (w, h) = (12usize, 10usize);
+        let mut raw = RawImage {
+            format: RawFormat::Dng,
+            width: w,
+            height: h,
+            cpp: 1,
+            data: RawData::U16(vec![100; w * h]),
+            cfa: Cfa::bayer("RGGB"),
+            bits: 12,
+            black: BlackLevel::uniform(64.0),
+            white: vec![1023.0],
+            active_area: Rect::new(usize::MAX, 0, 1, 1),
+            crop: Rect::default(),
+            orientation: Orientation::Normal,
+            color: ColorData::default(),
+            wb_multipliers: None,
+            linearized: false,
+            opcodes: OpcodeLists::default(),
+            metadata: Metadata::default(),
+        };
+        assert!(raw.validate().is_err(), "`x + width` wrapped: the area is outside the image");
+        assert!(raw.normalized().is_err());
+        raw.active_area = Rect::new(0, 0, w + 1, h);
+        assert!(raw.validate().is_err(), "one past the last column is outside too");
     }
 
     #[test]

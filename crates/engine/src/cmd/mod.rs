@@ -24,6 +24,8 @@ pub mod keywords;
 pub mod library;
 pub mod lut_profiles;
 pub mod manage;
+pub mod mask_effect_files;
+pub mod mask_effects;
 mod masks;
 mod merge;
 pub mod metadata;
@@ -33,6 +35,8 @@ mod prefs;
 mod preset_files;
 pub mod previews;
 mod query;
+pub mod recheck;
+mod slideshow;
 mod sync;
 mod xmp;
 
@@ -145,6 +149,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(manage::specs());
         v.extend(previews::specs());
         v.extend(lut_profiles::specs());
+        v.extend(mask_effects::specs());
         v.extend(cull::specs());
         v.extend(convert::specs());
         v.extend(convert::edit_specs());
@@ -153,10 +158,12 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(xmp::specs());
         v.extend(preset_files::specs());
         v.extend(prefs::specs());
+        v.extend(slideshow::specs());
         v.extend(export::specs());
         v.extend(before::specs());
         v.extend(browse::specs());
         v.extend(missing::specs());
+        v.extend(recheck::specs());
         v.extend(sync::specs());
         v.extend(metadata::specs());
         v.extend(geocode::specs());
@@ -186,6 +193,15 @@ pub(crate) fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
 }
 pub(crate) fn f64_req(p: &Value, key: &str, cmd: &str) -> Result<f64> {
     p.get(key).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("missing number `{key}`")))
+}
+/// A non-negative integer parameter: `index: -1` must be an error, not element 0 (`-1.0 as usize`
+/// saturates to 0), just as `history.restore` already refuses a negative step index.
+pub(crate) fn index_req(p: &Value, key: &str, cmd: &str) -> Result<usize> {
+    let i = f64_req(p, key, cmd)?;
+    if !(i.is_finite() && i >= 0.0) {
+        return Err(bad(cmd, format!("`{key}` must be a non-negative integer")));
+    }
+    Ok(i as usize)
 }
 pub(crate) fn f64_or(p: &Value, key: &str, d: f64) -> f64 {
     p.get(key).and_then(Value::as_f64).unwrap_or(d)

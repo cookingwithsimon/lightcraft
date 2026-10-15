@@ -42,7 +42,7 @@ fn corpus_raw_decodes() {
         let preview = embedded_preview(&bytes);
         let tp = t0.elapsed().as_secs_f64() * 1e3;
         // DNG previews are optional (and some carry only an uncompressed RGB thumbnail); vendor raws embed a JPEG,
-        // except the Panasonic `.RAW` files of 2005–2007 and Canon's explicit HEVC preview tracks.
+        // except the Panasonic `.RAW` files of 2005–2007, Canon's explicit HEVC preview tracks and Mamiya MEF.
         if let Some(p) = &preview {
             let jpeg = p.starts_with(&[0xff, 0xd8]) && p.ends_with(&[0xff, 0xd9]);
             let jxl = p.starts_with(&[0xff, 0x0a]) || p.starts_with(b"\0\0\0\x0cJXL ");
@@ -51,7 +51,11 @@ fn corpus_raw_decodes() {
             let hevc_preview = fmt == RawFormat::Cr3
                 && lightcraft_meta::cr3::parse_cr3(&bytes)
                     .is_some_and(|c| c.tracks.iter().any(|t| t.kind == lightcraft_meta::cr3::Cr3TrackKind::Other(*b"HEVC") && t.data.is_some()));
-            assert!(fmt == RawFormat::Dng || name.starts_with("raw-panasonic-") || hevc_preview, "{name}: no embedded preview");
+            // the Mamiya ZD's previews are uncompressed RGB sub-IFDs, not JPEGs
+            assert!(
+                fmt == RawFormat::Dng || fmt == RawFormat::Mef || name.starts_with("raw-panasonic-") || hevc_preview,
+                "{name}: no embedded preview"
+            );
         }
         let preview_kb = preview.as_ref().map_or(0, |p| p.len() / 1024);
         let t1 = Instant::now();
@@ -626,6 +630,87 @@ fn corpus_sony_16x9_crops() {
     eprintln!("Sony 16:9 crops checked on {seen} files");
 }
 
+/// Sony ILCE-7RM6: the distortion table in the raw IFD (`0x7037`) becomes a one-plane `WarpRectilinear` in
+/// `OpcodeList3` (`vendor::arw_lens_rm6`; the lateral CA table is read but its planes are off by default, and their
+/// numbers for these files are checked in `arw_lens_rm6`'s unit tests). Expected: the conversion recipe measured on 54
+/// ILCE-7RM6 photos, evaluated in f64 for each file's tables, decoded active area (the padded lossless tiles) and
+/// default crop. All four files carry distortion correction off in camera; the table is applied anyway.
+#[test]
+fn corpus_sony_lens_tables_become_opcodes() {
+    let dir = corpus_root().join("raw");
+    // (file, active area, default crop x, y, width, height, opcode centre, G-plane k0..k3)
+    let cases = [
+        // not pinned in `cargo xtask corpus` (at most two pins per PR; the ARW 6.0 decoder pins the two Compressed files
+        // below): checked only where the file is present (RawDB `ILCE-7RM6_FF_land_RAW.ARW`, CC0)
+        (
+            "arw-sony-ilce7rm6-ff-land-lossless.arw",
+            (10240, 7168),
+            (12, 8, 9984, 6656),
+            [0.488670768629749, 0.4653969582810102],
+            [0.9717033132764651, 0.023249297636569695, 0.008638979168841135, 0.003091041831374855],
+        ),
+        // pinned in `cargo xtask corpus` (RawDB `ILCE-7RM6_APSC_land_RAW.ARW`, CC0)
+        (
+            "arw-sony-ilce7rm6-apsc-land-lossless.arw",
+            (6656, 4608),
+            (16, 10, 6528, 4352),
+            [0.49278737791134486, 0.4743868026915563],
+            [1.016366854640611, -0.0688824189782517, 0.03615745253291194, -0.009438825010476538],
+        ),
+        // pinned by the ARW 6.0 decoder (RawDB `ILCE-7RM6_FF_land_RAW-C.ARW`, CC0): the same scene as the full-frame
+        // lossless file, its table one step off at knot 12 (268, not 267), on the decoder's unpadded geometry
+        (
+            "arw6-sony-ilce7rm6-ff-land-c.arw",
+            (10016, 6672),
+            (12, 8, 9984, 6656),
+            [0.49960059910134796, 0.5],
+            [0.9714600903266707, 0.02234210164294959, 0.001142578769532717, 0.005292120046651031],
+        ),
+        // pinned by the ARW 6.0 decoder (RawDB `ILCE-7RM6_APSC_land_RAW-C-HD.ARW`, CC0)
+        (
+            "arw6-sony-ilce7rm6-apsc-land-hq.arw",
+            (6592, 4372),
+            (16, 10, 6528, 4352),
+            [0.4975724472765893, 0.5],
+            [1.01627551, -0.0618606692, 0.02768349621, -0.005595798468],
+        ),
+    ];
+    let mut seen = 0;
+    for (name, (aw, ah), crop, center, k) in cases {
+        let bytes = match std::fs::read(dir.join(name)) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skip: {name} absent");
+                continue;
+            }
+            Err(e) => panic!("{name}: {e}"),
+        };
+        let img = decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let (a, c) = (img.active_area, img.crop);
+        eprintln!("{name}: active area {a:?}, crop {c:?}");
+        assert_eq!((a.x, a.y, a.width, a.height), (0, 0, aw, ah), "{name}: active area");
+        assert_eq!((c.x, c.y, c.width, c.height), crop, "{name}: default crop");
+        assert_eq!(probe_info(&bytes).unwrap().opcodes, img.opcodes, "{name}: the headers-only probe reads the same correction");
+        let warps: Vec<_> = img
+            .opcodes
+            .list3
+            .iter()
+            .filter_map(|op| match op {
+                lightcraft_raw::Opcode::WarpRectilinear { planes, center } => Some((planes, center)),
+                _ => None,
+            })
+            .collect();
+        let [(planes, got)] = warps.as_slice() else { panic!("{name}: {:?}", img.opcodes.list3) };
+        assert_eq!(planes.len(), 1, "{name}: one plane (G; lateral CA off by default)");
+        assert!((got[0] - center[0]).abs() < 1e-6 && (got[1] - center[1]).abs() < 1e-6, "{name}: centre {got:?}, want {center:?}");
+        for (i, want) in k.iter().enumerate() {
+            assert!((planes[0][i] - want).abs() < 1e-6, "{name}: k{i} {}, want {want}", planes[0][i]);
+        }
+        seen += 1;
+    }
+    eprintln!("Sony lens tables checked on {seen} files");
+}
+
 /// The embedded JPEG as linear RGB, reduced to `gw × gh` cells.
 fn jpeg_cells(jpeg: &[u8], gw: usize, gh: usize) -> Vec<[f64; 3]> {
     use zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
@@ -1167,4 +1252,59 @@ fn fuji_embedded_lens_tables_follow_the_validated_models() {
         checked += 1;
     }
     eprintln!("Fuji lens tables: {checked} RAFs, {warped} warps, {vignetted} vignette gains");
+}
+
+/// Epson ERF (`crates/raw/src/vendor/erf.rs`): the 16-byte block strip decodes to a smooth 3040 x 2024 RGGB
+/// mosaic with the maker note's black levels, the 3008 x 2000 crop and a white balance measured from the
+/// preview's neutral pixels. Skips files that are absent.
+#[test]
+fn corpus_epson_erf() {
+    let root = corpus_root().join("raw");
+    let mut checked = 0;
+    for name in ["erf-epson-rd1.erf", "erf-epson-rd1s.erf", "erf-epson-rd1x.erf"] {
+        let Ok(bytes) = std::fs::read(root.join(name)) else {
+            eprintln!("skip: {name} absent");
+            continue;
+        };
+        assert_eq!(probe(&bytes), Some(RawFormat::Erf), "{name}");
+        let img = decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!((img.width, img.height, img.bits), (3040, 2024, 12), "{name}");
+        assert_eq!((img.crop.x, img.crop.y, img.crop.width, img.crop.height), (20, 12, 3008, 2000), "{name}");
+        assert_eq!(img.cfa.as_ref().map(|c| c.name()).as_deref(), Some("RGGB"), "{name}");
+        assert!(img.black.values.len() == 4 && img.black.values.iter().all(|b| (55.0..=70.0).contains(b)), "{name}: {:?}", img.black.values);
+        let wb = img.wb_multipliers.unwrap_or_else(|| panic!("{name}: no white balance"));
+        eprintln!("{name}: wb {wb:?}");
+        if name == "erf-epson-rd1s.erf" {
+            assert!((wb[0] - 2.68).abs() < 0.1 && (wb[2] - 1.31).abs() < 0.1, "{name}: {wb:?}");
+        }
+        // same-colour neighbours differ little: the bit order is right
+        let lightcraft_raw::RawData::U16(d) = &img.data else { panic!("float data") };
+        let step: f64 = d.chunks(3040).take(400).flat_map(|r| r.windows(3).map(|w| f64::from(w[0].abs_diff(w[2])))).sum::<f64>() / (400.0 * 3038.0);
+        assert!(step < 40.0, "{name}: rough {step}");
+        assert!(embedded_preview(&bytes).is_some(), "{name}: no preview");
+        checked += 1;
+    }
+    eprintln!("ERF: {checked} corpus files checked");
+}
+
+/// Mamiya MEF (`crates/raw/src/vendor/mef.rs`): the uncompressed 12-bit strip decodes to a smooth 4016 x 5344 RGGB
+/// mosaic, the crop is the preview's window and the white balance comes from the RGB preview. Skips when absent.
+#[test]
+fn corpus_mamiya_mef() {
+    let Ok(bytes) = std::fs::read(corpus_root().join("raw").join("mef-mamiya-zd.mef")) else {
+        eprintln!("skip: mef-mamiya-zd.mef absent");
+        return;
+    };
+    assert_eq!(probe(&bytes), Some(RawFormat::Mef));
+    let img = decode(&bytes).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!((img.width, img.height, img.bits), (4016, 5344, 12));
+    assert_eq!((img.crop.x, img.crop.y, img.crop.width, img.crop.height), (24, 12, 3968, 5312));
+    assert_eq!(img.cfa.as_ref().map(|c| c.name()).as_deref(), Some("RGGB"));
+    assert_eq!(img.orientation, lightcraft_geom::Orientation::from_exif(6));
+    let wb = img.wb_multipliers.expect("white balance");
+    eprintln!("MEF wb {wb:?}");
+    assert!(wb.iter().all(|g| (0.5..=4.0).contains(g)), "{wb:?}");
+    let lightcraft_raw::RawData::U16(d) = &img.data else { panic!("float data") };
+    let step: f64 = d.chunks(4016).take(400).flat_map(|r| r.windows(3).map(|w| f64::from(w[0].abs_diff(w[2])))).sum::<f64>() / (400.0 * 4014.0);
+    assert!(step < 40.0, "rough {step}");
 }
