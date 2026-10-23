@@ -68,12 +68,29 @@ pub struct Vig {
     pub style: VignetteStyle,
 }
 
+/// Exponent of the V3 darkening curve: `1 − (1 − a)^P` takes Amount −30 to V1/V2's −75 (issue #2369:
+/// the V2 value that best matched Lightroom Classic's −30) and keeps −100 at −100.
+const VIG_DARKEN_POW: f64 = 3.887; // ln(0.25) / ln(0.7)
+
+/// Strength of a vignette Amount (−100…100) as a fraction of full darkening (−1) or lightening (+1).
+/// From V3 a darkening Amount follows [`VIG_DARKEN_POW`]: V1 and V2 darkened about 2.5× too little
+/// for Lightroom's numbers. Lightening is unmeasured and keeps its scale.
+fn vignette_amount(s: &DevelopSettings) -> f32 {
+    let a = (s.vignette.amount / 100.0).clamp(-1.0, 1.0);
+    let a = match s.process.process() {
+        Process::V1 | Process::V2 => a,
+        Process::V3 if a < 0.0 => -(1.0 - (1.0 + a).powf(VIG_DARKEN_POW)),
+        Process::V3 => a,
+    };
+    a as f32
+}
+
 fn vignette(s: &DevelopSettings) -> Option<Vig> {
     let v = &s.vignette;
     (v.amount != 0.0).then(|| {
         let r = (v.roundness / 100.0) as f32;
         Vig {
-            amount: (v.amount / 100.0) as f32,
+            amount: vignette_amount(s),
             start: 0.15 + (v.midpoint / 100.0) as f32 * 0.95,
             width: 0.05 + (v.feather / 100.0) as f32 * 1.1,
             aspect_mix: ((r + 1.0) / 2.0).clamp(0.0, 1.0),
@@ -280,8 +297,9 @@ impl FinishParams {
 pub fn base_tone(s: &DevelopSettings, info: &SourceInfo, peak: f32) -> ToneMap {
     let l = &s.light;
     match s.process.process() {
-        // V2 changes the Highlights/Shadows base (`local::tone_base`), not the tone map
-        Process::V1 | Process::V2 => match info.camera_tone.as_ref().filter(|_| info.raw) {
+        // V2 changes the Highlights/Shadows base (`local::tone_base`), V3 the vignette (`vignette`),
+        // not the tone map
+        Process::V1 | Process::V2 | Process::V3 => match info.camera_tone.as_ref().filter(|_| info.raw) {
             Some(curve) => ToneMap::camera_hdr(curve, l.contrast, l.whites, l.blacks, peak),
             None if info.raw => ToneMap::hdr(l.contrast, l.whites, l.blacks, peak),
             None => ToneMap::display_hdr(l.contrast, l.whites, l.blacks, peak),
@@ -800,5 +818,47 @@ mod tests {
         assert!(worst < 2e-5, "{worst}");
         assert_eq!(encode_srgb(lut, -1.0), 0.0);
         assert!((encode_srgb(lut, 2.0) - 1.0).abs() < 1e-6);
+    }
+
+    fn vig_on(p: Process, amount: f64) -> DevelopSettings {
+        let mut s = DevelopSettings { process: p.version(), ..DevelopSettings::default() };
+        s.vignette.amount = amount;
+        s
+    }
+
+    // Given a darkening vignette, V3 is as strong at Lightroom's numbers as V2 was at the value
+    // that matched them best (#2369: −30 ↔ −75); the ends, lightening and old processes are unchanged
+    #[test]
+    fn v3_vignette_darkens_as_lightroom_does() {
+        let amt = |p, a| vignette_amount(&vig_on(p, a));
+        assert!((amt(Process::V3, -30.0) - amt(Process::V2, -75.0)).abs() < 1e-3);
+        for a in [-100.0, 0.0, 30.0, 100.0] {
+            assert!((amt(Process::V3, a) - amt(Process::V2, a)).abs() < 1e-6, "{a}");
+        }
+        for a in [-100.0, -30.0, 40.0] {
+            assert_eq!(amt(Process::V1, a), amt(Process::V2, a));
+        }
+        // stronger for every darkening value in between, and still monotone
+        let mut last = 0.0;
+        for i in 1..100 {
+            let (v2, v3) = (amt(Process::V2, -f64::from(i)), amt(Process::V3, -f64::from(i)));
+            assert!(v3 < v2 && v3 < last, "{i}: {v3} vs {v2}");
+            last = v3;
+        }
+        // hostile values stay in range
+        assert!((amt(Process::V3, -1e9) + 1.0).abs() < 1e-6);
+        assert!(amt(Process::V3, f64::NAN).is_nan() || amt(Process::V3, f64::NAN).abs() <= 1.0);
+    }
+
+    // Given the same settings, a V3 render at −30 is the V2 render at −75, and a V2 edit keeps its look
+    #[test]
+    fn v3_vignette_renders_the_v2_best_match() {
+        let scene = lightcraft_scenes::demo_library()[0].render(240, 160);
+        let out = |s: &DevelopSettings| crate::render(&scene, &crate::SourceInfo::default(), s, &crate::RenderRequest::fit(240, 160)).image;
+        let (v3, v2_best, v2) = (out(&vig_on(Process::V3, -30.0)), out(&vig_on(Process::V2, -75.0)), out(&vig_on(Process::V2, -30.0)));
+        let worst = v3.data.iter().zip(&v2_best.data).flat_map(|(a, b)| (0..3).map(move |c| (a[c] as i32 - b[c] as i32).abs())).max();
+        assert!(worst.is_some_and(|w| w <= 1), "{worst:?}");
+        let corner = |i: &Rgba8| i.get(225, 150)[1] as i32;
+        assert!(corner(&v2) - corner(&v3) > 10, "{} vs {}", corner(&v2), corner(&v3));
     }
 }

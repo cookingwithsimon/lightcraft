@@ -1,5 +1,13 @@
 # What's new in LightCraft
 
+## 2026-10-23
+
+### Post-crop vignette as strong as Lightroom's
+- A darkening post-crop vignette now darkens about as much as Lightroom's at the same Amount. It used to need about
+  2.5 times the number: Lightroom's −30 looked like LightCraft's −75 (measured in issue #2369). This comes with
+  process version 3, so photos you have already edited keep their look until you choose Update to Current Process.
+  −100 is unchanged, and so is a lightening (positive) vignette.
+
 ## 2026-10-21
 
 ### Sharper resampling in HDR and panorama merges
