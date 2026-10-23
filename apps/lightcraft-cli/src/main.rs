@@ -732,12 +732,13 @@ fn render(args: &[String]) -> Result<(), String> {
     for (k, v) in opts {
         p[k] = v;
     }
-    let mut o = ExportOptions::from_params(&p).map_err(|e| e.to_string())?;
     if p.get("format").is_none() {
         let ext = Path::new(&output).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-        o.format = ExportFormat::parse(&ext)
-            .ok_or_else(|| format!("{output}: unknown extension (use .jpg .png .tif .webp .avif .dng or --opt format=…)"))?;
+        ExportFormat::parse(&ext).ok_or_else(|| format!("{output}: unknown extension (use .jpg .png .tif .webp .avif .dng or --opt format=…)"))?;
+        // given before validating, so `bitDepth` is checked against the format written (issue #1952)
+        p["format"] = json!(ext);
     }
+    let o = ExportOptions::from_params(&p).map_err(|e| e.to_string())?;
     // Add to Apple Photos: refused before anything is written when it can't be done
     let after = s.after_export(&o)?;
     let e = export_photo(&mut s, lightcraft_engine::catalog::PhotoId(id), &o, 1)?;
@@ -828,6 +829,8 @@ fn snapshot(args: &[String]) -> Result<(), String> {
     // before the first frame can start background adapter discovery.
     // This UI state is session-local: the CLI neither loads nor saves desktop ui.json.
     app.ui.settings.gpu = false;
+    // as the desktop app opens it: an empty library on the grid, where Import is offered
+    lightcraft_ui_egui::panels::empty_library::open_on_empty_library(&mut app);
     let mut h = Headless::new(app, size, scale);
     let timeout = Duration::from_secs(60);
     let mut shots = 0usize;

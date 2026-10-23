@@ -82,7 +82,11 @@ pub enum ResizeMode {
     Width,
     /// `value` = height in pixels.
     Height,
-    /// Fit inside `value × height` pixels, whichever way round the photo is (long edge ≤ the larger).
+    /// Fit inside `value` wide × `height` tall as the photo stands: width ≤ `value`, height ≤
+    /// `height` (Lightroom's "Width & Height").
+    WidthHeight,
+    /// Fit inside `value × height` pixels, whichever way round the photo is (long edge ≤ the
+    /// larger; Lightroom's "Dimensions").
     Dimensions,
     /// `value` = megapixels.
     Megapixels,
@@ -96,7 +100,7 @@ pub enum ResizeMode {
 pub struct Resize {
     pub mode: ResizeMode,
     pub value: f32,
-    /// Second dimension for [`ResizeMode::Dimensions`].
+    /// Second dimension for [`ResizeMode::Dimensions`] and [`ResizeMode::WidthHeight`].
     pub height: u32,
     /// Never upscale past the photo's own (cropped) size.
     pub dont_enlarge: bool,
@@ -127,6 +131,7 @@ impl Resize {
             ResizeMode::ShortEdge => v / short,
             ResizeMode::Width => v / w,
             ResizeMode::Height => v / h,
+            ResizeMode::WidthHeight => (v / w).min(self.height as f64 / h),
             ResizeMode::Dimensions => {
                 let (a, b) = (v, self.height as f64);
                 (a.max(b) / long).min(a.min(b) / short)
@@ -185,6 +190,17 @@ impl DestinationMode {
     }
 }
 
+impl Conflict {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "unique" => Some(Self::Unique),
+            "overwrite" => Some(Self::Overwrite),
+            "skip" => Some(Self::Skip),
+            _ => None,
+        }
+    }
+}
+
 /// A named set of `app.export` params.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExportPreset {
@@ -214,6 +230,18 @@ pub enum SharpenFor {
     Glossy,
 }
 
+impl SharpenFor {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "screen" => Some(Self::Screen),
+            "matte" => Some(Self::Matte),
+            "glossy" => Some(Self::Glossy),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SharpenAmount {
@@ -221,6 +249,17 @@ pub enum SharpenAmount {
     #[default]
     Standard,
     High,
+}
+
+impl SharpenAmount {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "standard" => Some(Self::Standard),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
 }
 
 /// Where a watermark sits.
@@ -537,6 +576,18 @@ pub enum MetadataPolicy {
     None,
 }
 
+impl MetadataPolicy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" => Some(Self::All),
+            "allexceptcamera" => Some(Self::AllExceptCamera),
+            "copyright" => Some(Self::Copyright),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
 /// Transfer curve of an HDR AVIF export (`hdrTransfer`): PQ (absolute, SDR white at 203 cd/m²) or
 /// HLG (relative to the display; BT.2100 with SDR white at signal 0.75).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -675,6 +726,7 @@ pub const OPTION_PARAMS: &[&str] = &[
     "height",
     "megapixels",
     "percent",
+    "fit",
     "dontEnlarge",
     "ppi",
     "limitKb",
@@ -770,8 +822,17 @@ impl ExportOptions {
     /// newer version may have written and this one doesn't know dropped, also inside `watermark`.
     /// [`ExportOptions::validate`] is strict about what a caller types; settings saved on disk are
     /// not the caller's typo, and refusing them would make a preset or Export with Previous fail
-    /// for good after an update.
+    /// for good after an update. A `bitDepth` the stored format doesn't have (written at the
+    /// format's own depth before issue #1952) is dropped too.
     pub fn known_keys_only(p: &serde_json::Value) -> serde_json::Value {
+        let mut p = Self::known_keys(p);
+        Self::drop_unfit_depth(&mut p, ExportFormat::default());
+        p
+    }
+
+    /// [`ExportOptions::known_keys_only`] keeping `bitDepth`, for a preset whose format may only be
+    /// known once the call's own params (`path`) are merged in.
+    pub(crate) fn known_keys(p: &serde_json::Value) -> serde_json::Value {
         let mut p = p.clone();
         if let Some(o) = p.as_object_mut() {
             o.retain(|k, _| OPTION_PARAMS.contains(&k.as_str()) || TARGET_PARAMS.contains(&k.as_str()));
@@ -782,13 +843,44 @@ impl ExportOptions {
         p
     }
 
+    /// Drop a stored `bitDepth` the format `p` exports ([`ExportOptions::export_format`] with
+    /// `fallback`) doesn't have: it was written at the format's own depth before issue #1952.
+    pub(crate) fn drop_unfit_depth(p: &mut serde_json::Value, fallback: ExportFormat) {
+        let format = Self::export_format(p, fallback);
+        if let Some(o) = p.as_object_mut()
+            && let Some(depth) = o.get("bitDepth").and_then(whole)
+            && !Self::bit_depths(format).iter().any(|d| i64::from(d.0) == depth)
+        {
+            o.remove("bitDepth");
+        }
+    }
+
     /// Strict [`ExportOptions::from_json`] for a command that is about to export (issue #181): an
     /// unknown parameter or a value that cannot be read as what it is for is an error, never a
     /// silent default. `app.export` targets (`id`, `ids`, `path`, `dir`, `preset`, `background`)
     /// are accepted and left to the caller.
     pub fn from_params(p: &serde_json::Value) -> crate::Result<Self> {
-        Self::validate("app.export", p)?;
-        Ok(Self::from_json(p))
+        Self::from_params_or(p, ExportFormat::default())
+    }
+
+    /// [`ExportOptions::from_params`] for a caller that writes `fallback` to a `path` naming no
+    /// format; the format returned is [`ExportOptions::export_format`], the one written.
+    pub fn from_params_or(p: &serde_json::Value, fallback: ExportFormat) -> crate::Result<Self> {
+        let format = Self::export_format(p, fallback);
+        Self::validate_as("app.export", p, Some(format))?;
+        Ok(Self { format, ..Self::from_json(p) })
+    }
+
+    /// The format `app.export` writes: `format` (`null`: the default), else the one the extension of
+    /// `path` names, else `fallback` for a path that names none (the desktop app writes JPEG there,
+    /// the headless backend PNG), else the default.
+    pub fn export_format(p: &serde_json::Value, fallback: ExportFormat) -> ExportFormat {
+        use serde_json::Value;
+        match (p.get("format"), p.get("path").and_then(Value::as_str)) {
+            (Some(f), _) => f.as_str().and_then(ExportFormat::parse).unwrap_or_default(),
+            (None, Some(path)) => std::path::Path::new(path).extension().and_then(|e| e.to_str()).and_then(ExportFormat::parse).unwrap_or(fallback),
+            (None, None) => ExportFormat::default(),
+        }
     }
 
     /// Check `app.export` params for `cmd` (the command named in the error): every key must be an
@@ -796,6 +888,12 @@ impl ExportOptions {
     /// kind of thing its key takes, and a `watermark` object must hold only [`WATERMARK_PARAMS`]
     /// with its sizes in range (issue #183). `null` means "not given", as a dropped key does.
     pub fn validate(cmd: &str, p: &serde_json::Value) -> crate::Result<()> {
+        Self::validate_as(cmd, p, Some(Self::export_format(p, ExportFormat::default())))
+    }
+
+    /// [`ExportOptions::validate`] with `bitDepth` checked against `format`, the one exported
+    /// (`None`: not known yet, as for a preset without `format`).
+    pub(crate) fn validate_as(cmd: &str, p: &serde_json::Value, format: Option<ExportFormat>) -> crate::Result<()> {
         use serde_json::Value;
         let bad = |msg: String| crate::cmd::bad(cmd, msg);
         let Some(obj) = p.as_object() else { return Err(bad("params must be an object".into())) };
@@ -813,6 +911,10 @@ impl ExportOptions {
         let one_of = |k: &str, v: &Value, options: &[&str]| -> crate::Result<()> {
             let s = string(cmd, k, v)?;
             if options.iter().any(|o| o.eq_ignore_ascii_case(s)) { Ok(()) } else { Err(bad(format!("`{k}` must be one of {}", options.join("|")))) }
+        };
+        // a choice `from_json` reads with the same `parse`, so what passes here is what gets exported
+        let parses = |k: &str, v: &Value, parse: fn(&str) -> bool, options: &[&str]| -> crate::Result<()> {
+            if parse(string(cmd, k, v)?) { Ok(()) } else { Err(bad(format!("`{k}` must be one of {}", options.join("|")))) }
         };
         for (k, v) in obj {
             if v.is_null() {
@@ -844,6 +946,7 @@ impl ExportOptions {
                 "longEdge" | "shortEdge" | "width" | "height" | "megapixels" | "percent" => {
                     num(k, v, 0.0, 1.0e9)?;
                 }
+                "fit" => one_of(k, v, &["dimensions", "widthHeight"])?,
                 "resize" => {
                     let Some(r) = v.as_object() else { return Err(bad(format!("`{k}` must be an object {{mode, value, height?, dontEnlarge?}}"))) };
                     if let Some(x) = r.keys().find(|x| !matches!(x.as_str(), "mode" | "value" | "height" | "dontEnlarge")) {
@@ -869,10 +972,10 @@ impl ExportOptions {
                 "naming" | "subfolder" | "path" | "dir" | "preset" => {
                     string(cmd, k, v)?;
                 }
-                "sharpen" => one_of(k, v, &["none", "screen", "matte", "glossy"])?,
-                "sharpenAmount" => one_of(k, v, &["low", "standard", "high"])?,
+                "sharpen" => parses(k, v, |s| SharpenFor::parse(s).is_some(), &["none", "screen", "matte", "glossy"])?,
+                "sharpenAmount" => parses(k, v, |s| SharpenAmount::parse(s).is_some(), &["low", "standard", "high"])?,
                 "hdrTransfer" => one_of(k, v, &["pq", "hlg"])?,
-                "conflict" => one_of(k, v, &["unique", "overwrite", "skip"])?,
+                "conflict" => parses(k, v, |s| Conflict::parse(s).is_some(), &["unique", "overwrite", "skip"])?,
                 "destinationMode" => one_of(k, v, &["specificFolder", "sameAsOriginal"])?,
                 "tiffCompression" => one_of(k, v, &["none", "lzw", "zip", "deflate"])?,
                 "jxlEffort" => one_of(k, v, &["fast", "normal"])?,
@@ -880,7 +983,7 @@ impl ExportOptions {
                     serde_json::from_value::<DngCompression>(v.clone())
                         .map_err(|_| bad(format!("`{k}` must be one of lossless|deflate|uncompressed|lossy")))?;
                 }
-                "metadata" => one_of(k, v, &["all", "allExceptCamera", "copyright", "none"])?,
+                "metadata" => parses(k, v, |s| MetadataPolicy::parse(s).is_some(), &["all", "allExceptCamera", "copyright", "none"])?,
                 "colorSpace" => {
                     if OutputSpace::parse(string(cmd, k, v)?).is_none() {
                         return Err(bad(format!("`{k}` must be one of srgb|displayP3|adobeRgb|proPhoto|rec2020")));
@@ -897,6 +1000,18 @@ impl ExportOptions {
                     }
                 }
                 _ => return Err(bad(unknown_key("parameter", k, &known))),
+            }
+        }
+        // issue #1952: a depth the format doesn't have would be written at the format's own depth
+        if let (Some(format), Some(depth)) = (format, obj.get("bitDepth").and_then(whole)) {
+            let mut depths: Vec<u8> = Self::bit_depths(format).iter().map(|d| d.0).collect();
+            if !depths.iter().any(|d| i64::from(*d) == depth) {
+                depths.sort_unstable();
+                let mut list: Vec<String> = depths.iter().map(u8::to_string).collect();
+                let last = list.pop().unwrap_or_default();
+                let list = if list.is_empty() { last } else { format!("{} or {last}", list.join(", ")) };
+                let name = serde_json::to_value(format).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+                return Err(bad(format!("`bitDepth` must be {list} for {name}")));
             }
         }
         Ok(())
@@ -982,13 +1097,13 @@ impl ExportOptions {
             resize: Self::resize_from_json(p),
             ppi: u("ppi").filter(|v| *v > 0).map_or(d.ppi, |v| v.min(u16::MAX as u64) as u16),
             limit_kb: u("limitKb").filter(|v| *v > 0).map(|v| v.min(u32::MAX as u64) as u32),
-            sharpen: enm(p, "sharpen").unwrap_or(d.sharpen),
-            sharpen_amount: enm(p, "sharpenAmount").unwrap_or(d.sharpen_amount),
+            sharpen: s("sharpen").and_then(SharpenFor::parse).unwrap_or(d.sharpen),
+            sharpen_amount: s("sharpenAmount").and_then(SharpenAmount::parse).unwrap_or(d.sharpen_amount),
             naming: s("naming").map_or(d.naming, str::to_string),
             start_number: u("startNumber").map_or(d.start_number, |v| v.min(999_999) as u32),
             destination_mode: s("destinationMode").and_then(DestinationMode::parse).unwrap_or(d.destination_mode),
             subfolder: s("subfolder").map_or(d.subfolder, |v| v.trim().replace(['\\', ':', '\0'], "_")),
-            conflict: enm(p, "conflict").unwrap_or(d.conflict),
+            conflict: s("conflict").and_then(Conflict::parse).unwrap_or(d.conflict),
             tiff_compression: match s("tiffCompression").map(str::to_ascii_lowercase).as_deref() {
                 Some("none") => TiffCompression::None,
                 Some("lzw") => TiffCompression::Lzw,
@@ -996,7 +1111,7 @@ impl ExportOptions {
                 _ => d.tiff_compression,
             },
             dng_compression: enm(p, "dngCompression").unwrap_or(d.dng_compression),
-            metadata: enm(p, "metadata").unwrap_or(d.metadata),
+            metadata: s("metadata").and_then(MetadataPolicy::parse).unwrap_or(d.metadata),
             remove_location: p.get("removeLocation").and_then(Value::as_bool).unwrap_or(d.remove_location),
             watermark: match p.get("watermark") {
                 Some(Value::String(t)) => Some(Watermark { text: t.clone(), ..Default::default() }),
@@ -1025,8 +1140,12 @@ impl ExportOptions {
             return (r.value > 0.0).then_some(Resize { dont_enlarge: p.get("dontEnlarge").and_then(Value::as_bool).unwrap_or(r.dont_enlarge), ..r });
         }
         let r = |mode, value: f64| Resize { mode, value: value.min(65_535.0) as f32, height: 0, dont_enlarge };
+        // `fit: widthHeight` binds each edge to its own number; the default fits either orientation
+        let bound = p.get("fit").and_then(Value::as_str).is_some_and(|fit| fit.eq_ignore_ascii_case("widthHeight"));
         Some(match (f("width"), f("height")) {
-            (Some(w), Some(h)) => Resize { height: h.min(65_535.0) as u32, ..r(ResizeMode::Dimensions, w) },
+            (Some(w), Some(h)) => {
+                Resize { height: h.min(65_535.0) as u32, ..r(if bound { ResizeMode::WidthHeight } else { ResizeMode::Dimensions }, w) }
+            }
             (Some(w), None) => r(ResizeMode::Width, w),
             (None, Some(h)) => r(ResizeMode::Height, h),
             (None, None) => {
@@ -1260,7 +1379,15 @@ pub fn encode_with_metadata(img: &Rgba8, o: &ExportOptions, meta: Option<&Metada
     let exif = meta.map(lightcraft_meta::write_exif);
     let xmp = meta.map(|m| lightcraft_meta::write_xmp(m, None));
     let meta = EncodeMeta { icc: Some(&profile), exif: exif.as_deref(), xmp: xmp.as_deref(), ppi: Some(o.ppi) };
-    let e = EncodeImage::rgba8(&img);
+    // Opaque photo exports need no alpha channel (#1670). Keep real transparency for
+    // callers of this encoder, and leave unrelated formats on their existing path.
+    let rgb: Option<Vec<u8>> = (matches!(o.format, ExportFormat::Png | ExportFormat::Tiff | ExportFormat::Webp)
+        && img.data.iter().all(|p| p.last() == Some(&255)))
+    .then(|| img.data.iter().flat_map(|p| p.iter().take(3).copied()).collect());
+    let e = match &rgb {
+        Some(data) => EncodeImage::new(img.width as u32, img.height as u32, 3, Samples::U8(data)),
+        None => EncodeImage::rgba8(&img),
+    };
     let r = match o.format {
         ExportFormat::Jpeg => {
             // 4:4:4 normally; 4:2:0 when targeting a file size (much smaller at equal visual quality).
@@ -1963,6 +2090,9 @@ fn run_batch_with(
         ahead: lanes,
     };
     std::thread::scope(|sc| {
+        // stops the lanes however this thread leaves the scope: a panic in `progress` or the placer
+        // would otherwise leave them waiting and the scope's join would never return
+        let _stop = StopOnDrop(&queue);
         for k in 1..lanes {
             let q = &queue;
             // a lane that can't start leaves its photos to the others (and to this thread)
@@ -1980,11 +2110,18 @@ fn run_batch_with(
             }
             Ok::<_, String>(())
         };
-        let r = placed();
-        queue.stop();
-        r
+        placed()
     })?;
     Ok(std::mem::take(&mut placer.out))
+}
+
+/// Stops a [`Queue`] when dropped, also while unwinding from a panic.
+struct StopOnDrop<'a>(&'a Queue);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
 }
 
 /// Run one photo's export holding its working memory from [`crate::memory::export_gate`]; a panic
@@ -2231,6 +2368,43 @@ mod tests {
         img
     }
 
+    /// Issue #1670: removing a redundant alpha channel preserves samples and metadata.
+    #[test]
+    fn opaque_eight_bit_exports_are_rgb() {
+        let img = test_image();
+        let metadata = Metadata { copyright: Some("Synthetic export test".into()), ..Default::default() };
+        for format in [ExportFormat::Png, ExportFormat::Tiff, ExportFormat::Webp] {
+            for compression in [TiffCompression::None, TiffCompression::Lzw, TiffCompression::Deflate, TiffCompression::PackBits] {
+                let options = ExportOptions { format, tiff_compression: compression, ..Default::default() };
+                let bytes = encode_with_metadata(&img, &options, Some(&metadata)).unwrap();
+                let decoded = lightcraft_codecs::decode(&bytes, Default::default()).unwrap();
+                assert!(!decoded.has_alpha, "{format:?}/{compression:?} must be RGB");
+                assert_eq!((decoded.width, decoded.height, decoded.bit_depth), (96, 64, 8));
+                assert_eq!(decoded.to_srgb8().data, img.data, "{format:?}/{compression:?} pixels");
+                assert_eq!(decoded.icc.as_deref(), Some(icc::write_named(NamedSpace::Srgb).as_slice()));
+                assert!(decoded.xmp.as_deref().unwrap_or_default().contains("Synthetic export test"));
+                if format == ExportFormat::Png {
+                    assert_eq!(bytes[25], 2, "PNG IHDR declares RGB");
+                }
+                if format != ExportFormat::Tiff {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eight_bit_exports_preserve_real_alpha() {
+        let mut img = test_image();
+        img.data[0][3] = 128;
+        for format in [ExportFormat::Png, ExportFormat::Tiff, ExportFormat::Webp] {
+            let bytes = encode_image(&img, &ExportOptions { format, ..Default::default() }).unwrap();
+            let decoded = lightcraft_codecs::decode(&bytes, Default::default()).unwrap();
+            assert!(decoded.has_alpha, "{format:?} must retain real alpha");
+            assert_eq!(decoded.to_srgb8().data, img.data, "{format:?} samples");
+        }
+    }
+
     #[test]
     fn formats_have_magic() {
         let img = test_image();
@@ -2457,7 +2631,7 @@ mod tests {
     fn biz_ud_vertical_watermarks_place_punctuation_at_the_top_right() {
         use ab_glyph::Font;
         let Some(entry) = crate::fonts::CRAFT_FONTS.iter().find(|f| f.family == "BIZ UDMincho") else {
-            eprintln!("skipped: built without BIZ UDMincho from craft-fonts");
+            lightcraft_testkit::skip!(Fonts, "built without BIZ UDMincho from craft-fonts");
             return;
         };
         let font = ab_glyph::FontRef::try_from_slice(entry.bytes).unwrap();
@@ -2529,7 +2703,7 @@ mod tests {
                 compare(composed, decomposed, crate::fonts::CRAFT_FONTS);
             }
         } else {
-            eprintln!("skipped Japanese comparisons: built without BIZ UDMincho from craft-fonts");
+            lightcraft_testkit::skip!(Fonts, "Japanese comparisons: built without BIZ UDMincho from craft-fonts");
         }
     }
 
@@ -2553,7 +2727,7 @@ mod tests {
         use ab_glyph::Font;
         let fonts = watermark_fonts(crate::fonts::CRAFT_FONTS);
         if fonts.len() < 2 {
-            eprintln!("skipped: built without CRAFT_FONTS_DIR, so there is no Japanese watermark face");
+            lightcraft_testkit::skip!(Fonts, "built without CRAFT_FONTS_DIR, so there is no Japanese watermark face");
             return;
         }
         for c in "日本語の文字".chars() {
@@ -2718,6 +2892,13 @@ mod tests {
         assert_eq!(size(json!({"width": 1000, "height": 800}), 6000.0, 4000.0), Some((1000, 667)));
         assert_eq!(size(json!({"width": 1000, "height": 800}), 4000.0, 6000.0), Some((667, 1000)));
         assert_eq!(size(json!({"width": 1000, "height": 500}), 6000.0, 4000.0), Some((750, 500)));
+        assert_eq!(size(json!({"width": 270, "height": 337, "fit": "dimensions"}), 480.0, 320.0), Some((337, 225)));
+        // Width & Height (`fit: widthHeight`) binds each edge to its own number: W limits the width, H the height (#1620)
+        assert_eq!(size(json!({"width": 270, "height": 337, "fit": "widthHeight"}), 480.0, 320.0), Some((270, 180)));
+        assert_eq!(size(json!({"width": 270, "height": 337, "fit": "widthHeight"}), 320.0, 480.0), Some((225, 337)));
+        assert_eq!(size(json!({"width": 240, "height": 300, "fit": "widthHeight"}), 480.0, 320.0), Some((240, 160)));
+        // `fit` only matters with both numbers
+        assert_eq!(size(json!({"width": 1000, "fit": "widthHeight"}), 6000.0, 4000.0), Some((1000, 667)));
         let (w, h) = size(json!({"megapixels": 6}), 6000.0, 4000.0).unwrap();
         assert!(((w * h) as f64 - 6e6).abs() < 6e6 * 0.002, "{w}×{h}");
         assert_eq!(size(json!({"percent": 25}), 6000.0, 4000.0), Some((1500, 1000)));
@@ -2732,6 +2913,8 @@ mod tests {
         let r = Resize { mode: ResizeMode::ShortEdge, value: 720.0, height: 0, dont_enlarge: false };
         let back = ExportOptions::from_json(&ExportOptions::resize_json(Some(&r))).resize;
         assert_eq!(back, Some(r));
+        let r = Resize { mode: ResizeMode::WidthHeight, value: 270.0, height: 337, dont_enlarge: true };
+        assert_eq!(ExportOptions::from_json(&ExportOptions::resize_json(Some(&r))).resize, Some(r));
         assert_eq!(ExportOptions::from_json(&ExportOptions::resize_json(None)).resize, None);
         assert_eq!(ExportOptions::from_json(&json!({"ppi": 300})).ppi, 300);
         // never larger than the encoders' limit, never empty
@@ -2803,6 +2986,7 @@ mod tests {
                         mode(ResizeMode::Width, value, 0),
                         mode(ResizeMode::Height, value, 0),
                         mode(ResizeMode::Dimensions, value, 1365),
+                        mode(ResizeMode::WidthHeight, value, 1365),
                         mode(ResizeMode::Megapixels, value / 1000.0, 0),
                         mode(ResizeMode::Percent, value / 100.0, 0),
                     ] {
@@ -3099,6 +3283,7 @@ mod tests {
         assert!(err(json!({"bitDepth": 12})).contains("`bitDepth` must be 8, 10, 16 or 32"));
         assert!(err(json!({"colorSpace": "cmyk"})).contains("`colorSpace` must be one of"));
         assert!(err(json!({"dontEnlarge": "no"})).contains("`dontEnlarge` must be true or false"));
+        assert!(err(json!({"fit": "sideways"})).contains("`fit` must be one of dimensions|widthHeight"));
         assert!(err(json!({"resize": {"mode": "longEdge", "valeu": 10}})).contains("did you mean `value`"));
         assert!(err(json!({"resize": {"mode": "diagonal", "value": 10}})).contains("`resize`:"));
         assert!(err(json!({"ids": [1, "x"]})).contains("`ids` must be an array of photo ids"));
@@ -3117,6 +3302,7 @@ mod tests {
             resize: Some(Resize::default()),
             limit_kb: Some(500),
             watermark: Some(Watermark { text: "©".into(), ..Default::default() }),
+            format: ExportFormat::Png,
             bit_depth: Some(16),
             ..Default::default()
         };
@@ -3153,6 +3339,51 @@ mod tests {
         ExportOptions::from_params(&json!({"quality": 92, "longEdge": null, "watermark": null})).unwrap();
     }
 
+    /// Issue #1952: a `bitDepth` the format doesn't have is refused (the Export dialog never offers
+    /// it), not written at the format's own depth; the error names the depths the format takes.
+    #[test]
+    fn bit_depth_must_suit_the_format() {
+        use serde_json::json;
+        let err = |p: serde_json::Value| ExportOptions::from_params(&p).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err(json!({"format": "jpeg", "bitDepth": 16})).contains("`bitDepth` must be 8 for jpeg"));
+        assert!(err(json!({"format": "png", "bitDepth": 10})).contains("`bitDepth` must be 8 or 16 for png"));
+        assert!(err(json!({"format": "tiff", "bitDepth": 10})).contains("`bitDepth` must be 8, 16 or 32 for tiff"));
+        // no `format`: the one `path` names, else the default (JPEG)
+        assert!(err(json!({"path": "/out/a.png", "bitDepth": 32})).contains("for png"));
+        assert!(err(json!({"bitDepth": 16})).contains("for jpeg"));
+        assert!(ExportOptions::from_params(&json!({"path": "/out/a.tif", "bitDepth": 32})).is_ok());
+        // a path naming no format, or a `null` format, exports the default too
+        assert!(err(json!({"path": "/out/output", "bitDepth": 10})).contains("for jpeg"));
+        assert!(err(json!({"path": "/out/output.xyz", "bitDepth": 10})).contains("for jpeg"));
+        assert!(err(json!({"format": null, "path": "/out/a.png", "bitDepth": 16})).contains("for jpeg"));
+        // or the caller's own format for such a path, which is the one returned
+        let png = |p: serde_json::Value| ExportOptions::from_params_or(&p, ExportFormat::Png);
+        assert!(png(json!({"path": "/out/output", "bitDepth": 10})).unwrap_err().to_string().contains("for png"));
+        assert_eq!(png(json!({"path": "/out/output.xyz", "bitDepth": 16})).unwrap().format, ExportFormat::Png);
+        assert_eq!(png(json!({"path": "/out/a.tif", "bitDepth": 32})).unwrap().format, ExportFormat::Tiff);
+        // stored settings (a preset, Export with Previous) lose such a depth instead of failing
+        let stored = ExportOptions::known_keys_only(&json!({"format": "jpeg", "bitDepth": 16}));
+        assert_eq!(stored.get("bitDepth"), None);
+        assert_eq!(ExportOptions::known_keys_only(&json!({"format": "tiff", "bitDepth": 32}))["bitDepth"], 32);
+        for f in [
+            ExportFormat::Jpeg,
+            ExportFormat::Png,
+            ExportFormat::Tiff,
+            ExportFormat::Psd,
+            ExportFormat::Webp,
+            ExportFormat::Avif,
+            ExportFormat::Jxl,
+            ExportFormat::Original,
+            ExportFormat::Dng,
+            ExportFormat::RenderedDng,
+        ] {
+            for &(b, _) in ExportOptions::bit_depths(f) {
+                let o = ExportOptions { format: f, bit_depth: Some(b), ..Default::default() };
+                assert_eq!(ExportOptions::from_params(&o.to_json()).ok(), Some(o), "{f:?} {b}");
+            }
+        }
+    }
+
     /// Issue #956: `destinationMode` picks a specific folder (the default) or each photo's own
     /// folder; it is checked like the other params and kept in presets and Export with Previous.
     #[test]
@@ -3180,6 +3411,58 @@ mod tests {
         let j = o.to_json();
         assert_eq!(j["destinationMode"], "sameAsOriginal");
         assert_eq!(ExportOptions::from_params(&ExportOptions::known_keys_only(&j)).unwrap(), o);
+    }
+
+    /// A choice the validation accepts is the one exported: `metadata: "NONE"` passed the
+    /// case-insensitive check, then failed the exact-case read and fell back to `all`, so GPS and
+    /// camera data went out in a file meant to carry none. `sharpen`, `sharpenAmount` and
+    /// `conflict` had the same gap.
+    #[test]
+    fn accepted_choices_are_the_ones_exported() {
+        use serde_json::json;
+        let read = |k: &str, v: &str| ExportOptions::from_params(&json!({ k: v })).map_err(|e| e.to_string());
+        let metadata = [
+            ("all", MetadataPolicy::All),
+            ("allExceptCamera", MetadataPolicy::AllExceptCamera),
+            ("copyright", MetadataPolicy::Copyright),
+            ("none", MetadataPolicy::None),
+        ];
+        for (name, want) in metadata {
+            for v in [name.to_string(), name.to_ascii_uppercase(), name.to_ascii_lowercase()] {
+                assert_eq!(read("metadata", &v).unwrap().metadata, want, "metadata: {v}");
+            }
+        }
+        for (name, want) in [("none", SharpenFor::None), ("screen", SharpenFor::Screen), ("matte", SharpenFor::Matte), ("glossy", SharpenFor::Glossy)]
+        {
+            assert_eq!(read("sharpen", &name.to_ascii_uppercase()).unwrap().sharpen, want);
+        }
+        for (name, want) in [("low", SharpenAmount::Low), ("standard", SharpenAmount::Standard), ("high", SharpenAmount::High)] {
+            assert_eq!(read("sharpenAmount", &name.to_ascii_uppercase()).unwrap().sharpen_amount, want);
+        }
+        for (name, want) in [("unique", Conflict::Unique), ("overwrite", Conflict::Overwrite), ("skip", Conflict::Skip)] {
+            assert_eq!(read("conflict", &name.to_ascii_uppercase()).unwrap().conflict, want);
+        }
+        // an explicit value nothing reads as is an error, never the permissive default
+        for v in ["", " none", "nothing", "all-except-camera"] {
+            let e = read("metadata", v).unwrap_err();
+            assert!(e.contains("`metadata` must be one of all|allExceptCamera|copyright|none"), "{v:?}: {e}");
+        }
+        assert!(read("sharpenAmount", "max").unwrap_err().contains("`sharpenAmount` must be one of low|standard|high"));
+        assert!(read("conflict", "replace").unwrap_err().contains("`conflict` must be one of unique|overwrite|skip"));
+        // absent (or null) keeps the defaults
+        let d = ExportOptions::from_params(&json!({"metadata": null})).unwrap();
+        assert_eq!(
+            (d.metadata, d.sharpen, d.sharpen_amount, d.conflict),
+            (MetadataPolicy::All, SharpenFor::None, SharpenAmount::Standard, Conflict::Unique)
+        );
+        // `removeLocation` stays independent of the policy's spelling
+        let o = ExportOptions::from_params(&json!({"metadata": "AllExceptCamera", "removeLocation": true})).unwrap();
+        assert_eq!((o.metadata, o.remove_location), (MetadataPolicy::AllExceptCamera, true));
+        // stored settings (lenient `from_json`) read the same spellings
+        assert_eq!(ExportOptions::from_json(&json!({"metadata": "None"})).metadata, MetadataPolicy::None);
+        // and `to_json` still writes what the MCP schema lists
+        let j = ExportOptions { metadata: MetadataPolicy::AllExceptCamera, conflict: Conflict::Skip, ..Default::default() }.to_json();
+        assert_eq!((j["metadata"].as_str(), j["conflict"].as_str()), (Some("allExceptCamera"), Some("skip")));
     }
 
     /// Issue #183: the `watermark` object's keys, kinds and ranges are checked (and documented in
@@ -3264,7 +3547,7 @@ mod tests {
     #[test]
     fn a_batch_reports_a_gpu_fallback_on_the_file_it_hit() {
         if !lightcraft_gpu::available() {
-            eprintln!("skipped: no GPU adapter ({:?})", lightcraft_gpu::unavailable_reason());
+            lightcraft_testkit::skip!(Gpu, "no GPU adapter ({})", lightcraft_gpu::unavailable_reason().unwrap_or_default());
             return;
         }
         let mut s = crate::Session::with_demo();
@@ -3325,6 +3608,32 @@ mod tests {
         let (f, w, sn) = lanes_batch(&mut s, &ids, &o, 3, true, 2);
         assert_eq!(shape(&f.unwrap()), shape(&files[..2]));
         assert_eq!((w.len(), sn.len()), (2, 3), "photos past the cancel are never written");
+    }
+
+    // A panic in `progress` while lanes run must end the batch (the lanes stop waiting), not hang it
+    #[test]
+    fn a_panic_in_progress_does_not_hang_the_lanes() {
+        let mut s = crate::Session::with_demo();
+        let ids: Vec<_> = s.visible().iter().copied().take(5).collect();
+        let o = ExportOptions::from_json(&json!({"format": "png", "width": 40}));
+        let items = prepare_batch(&mut s, &ids, &o).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let to = Destination { dir: "out".into(), exact: None };
+            let mut write = |_: &str, _: &[u8]| Ok(());
+            let mut calls = 0;
+            let mut progress = |_: usize, _: &str| {
+                calls += 1;
+                assert!(calls < 2, "progress panics on its second call");
+                true
+            };
+            let r = crate::guard::catch("test batch", || {
+                run_batch_with(items, &mut Placer::new(&o, &to, &mut write, &|_| false, true), &mut progress, 2)
+            });
+            tx.send(r.and_then(|r| r)).ok();
+        });
+        let r = rx.recv_timeout(std::time::Duration::from_secs(60));
+        assert!(matches!(r, Ok(Err(_))), "the batch returns an error instead of hanging: {r:?}");
     }
 
     // A photo that fails is reported in its place while the others are exported; with

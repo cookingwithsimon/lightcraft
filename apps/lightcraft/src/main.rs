@@ -978,6 +978,11 @@ fn main() -> eframe::Result {
                 app.notices.extend(launch_notices);
                 app.notices.extend(window_notice);
                 app.gpu_notice = true;
+                // an empty library opens where Import is offered (a grid, with the sidebar); before
+                // the snapshot below, so this alone isn't written to the settings file
+                if problem.is_none() && files.is_empty() {
+                    lightcraft_ui_egui::panels::empty_library::open_on_empty_library(&mut app);
+                }
                 // what's on disk now: only changes are written
                 let writer = PrefsWriter {
                     path: if in_memory { None } else { prefs_path() },

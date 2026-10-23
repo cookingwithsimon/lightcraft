@@ -36,6 +36,7 @@
   "Build Standard-Sized Previews ({scope})": "Créer les aperçus de taille standard ({scope})",
   "Building previews for {} photos…": "Création des aperçus pour {} photos…",
   "Click {}:1": "Cliquer sur {}:1",
+  "Color space: Rec. 2020 {curve} (HDR AVIF)": "Espace colorimétrique : Rec. 2020 {curve} (AVIF HDR)",
   "Couldn't open the editor: {e}": "Impossible d’ouvrir l’éditeur : {e}",
   "Create {n} Virtual Copies": "Créer {n} copies virtuelles",
   "Creates {} stacks from {} of {scope}": "Crée {} piles à partir de {} parmi {scope}",
@@ -162,6 +163,7 @@
   "{n} photo{}": "{n} photo{}",
   "{n} photo{} match · updates automatically as photos change": "{n} photo{} correspondante(s) · mise à jour automatique lorsque les photos changent",
   "{n} photo{} now · updates automatically as photos change": "{n} photo{} actuellement · mise à jour automatique lorsque les photos changent",
+  "{n} selected photos · {pages} pages": "{n} photos sélectionnées · {pages} pages",
   "{pid} (missing)": "{pid} (manquant)",
   "{sel_n} selected · {counted}": "{sel_n} sélectionné(s) · {counted}",
   "{stage}… {:.0}%": "{stage}… {:.0} %",
@@ -266,6 +268,7 @@
   "{n} originals opened in the other editor": "{n} originaux ouverts dans l’autre éditeur",
   "· {in_source} identical copies": "· {in_source} copies identiques",
   "{count} more warnings.": "{count} avertissements supplémentaires.",
+  "{skipped} catalog images were not imported because their records in the catalog are incomplete.": "{skipped} images du catalogue n’ont pas été importées, car leurs entrées dans le catalogue sont incomplètes.",
   "{photos} catalog records processed; {collections} collections.": "{photos} entrées du catalogue traitées ; {collections} collections.",
   "{missing} originals are missing. Their catalog records are available; use Find Missing Photos to relink them.": "{missing} originaux sont manquants. Leurs entrées de catalogue sont disponibles ; utilisez Rechercher les photos manquantes pour rétablir les liens.",
   "Applied {name}": "{name} appliqué",
@@ -289,5 +292,10 @@
   "Renames {n} face{} across the library. The files are not changed.": "Renomme {n} visage{} dans la bibliothèque. Les fichiers ne sont pas modifiés.",
   "“{to}” is already a person. Combining them makes one person; Undo separates them again.": "« {to} » est déjà une personne. Les combiner n’en fait qu’une ; Annuler les sépare de nouveau.",
   "{what} merge added at {mp}: its full size, {full}, needs more memory than this computer has": "Fusion de {what} ajoutée en {mp} : la taille complète, {full}, demande plus de mémoire que n’en a cet ordinateur",
-  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "Fusion de {what} ajoutée en {mp}, la plus grande taille possible pour un panorama (taille complète : {full})"
+  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "Fusion de {what} ajoutée en {mp}, la plus grande taille possible pour un panorama (taille complète : {full})",
+  "Already in “{}”": "Déjà dans « {} »",
+  "Move {n} photo{} to “{}”": "Déplacer {n} photo{} vers « {} »",
+  "Move {n} photo{} to “{}”?": "Déplacer {n} photo{} vers « {} » ?",
+  "Listing folders — folders: {folders}, files: {files}": "Liste des dossiers — dossiers : {folders}, fichiers : {files}",
+  "Moved {n} photo{} to “{}”. Edit → Undo moves them back.": "{n} photo{} déplacée(s) vers « {} ». Modifier → Annuler les remet en place."
 }

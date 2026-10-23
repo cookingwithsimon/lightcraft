@@ -9,7 +9,8 @@ use crate::headless::Headless;
 use crate::panels::activity::{WIDTH, count_text};
 use crate::{LightcraftApp, Services};
 
-const T: Duration = Duration::from_secs(20);
+// generous: merges and renders run on worker threads that a busy machine (a full workspace test run) slows a lot
+const T: Duration = Duration::from_secs(60);
 
 fn demo() -> Headless {
     let app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), Services { png: None, ..Default::default() });
@@ -357,6 +358,39 @@ fn final_merge_shows_a_row_and_cancels() {
     assert!(h.app.session.activity.list().is_empty());
     let toast = h.app.ui.toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
     assert_eq!(toast, "HDR merge cancelled");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The merge dialog opens with the options of the last merge of its kind (per kind), and "with Last
+/// Settings" uses them; a kind never merged opens with the defaults.
+#[test]
+fn merge_dialog_remembers_the_last_settings_per_kind() {
+    let (mut h, dir) = bracket("merge-last");
+    let opts = crate::merge::MergeDialog {
+        align: false,
+        deghost: "high".into(),
+        auto_settings: false,
+        ..crate::merge::MergeDialog::for_command("merge.hdr")
+    };
+    crate::merge::open(&mut h.app, "merge.hdr").unwrap();
+    h.app.ui.dialog = None;
+    crate::merge::start_final(&mut h.app, &opts).unwrap();
+    let row = h.app.session.activity.list()[0].id;
+    h.app.session.activity.cancel(row).unwrap();
+    assert!(h.step_until(T, |h| h.app.merge.final_task.is_none()));
+    crate::merge::open(&mut h.app, "merge.hdr").unwrap();
+    let Some(crate::state::Dialog::Merge { opts: shown }) = &h.app.ui.dialog else { panic!("no merge dialog") };
+    assert_eq!(shown, &opts);
+    crate::merge::open(&mut h.app, "merge.panorama").unwrap();
+    let Some(crate::state::Dialog::Merge { opts: shown }) = &h.app.ui.dialog else { panic!("no merge dialog") };
+    assert_eq!(shown, &crate::merge::MergeDialog::for_command("merge.panorama"));
+    h.app.ui.dialog = None;
+    // older or hand-edited preferences: missing fields take their defaults, junk is ignored
+    h.app.session.last_merge.insert("merge.panorama".into(), json!({"projection": "cylindrical", "command": "merge.hdr"}));
+    h.app.session.last_merge.insert("merge.hdrPanorama".into(), json!("junk"));
+    let pano = crate::merge::last_options(&h.app, "merge.panorama");
+    assert_eq!((pano.command.as_str(), pano.projection.as_str(), pano.auto_crop), ("merge.panorama", "cylindrical", true));
+    assert_eq!(crate::merge::last_options(&h.app, "merge.hdrPanorama"), crate::merge::MergeDialog::for_command("merge.hdrPanorama"));
     let _ = std::fs::remove_dir_all(dir);
 }
 

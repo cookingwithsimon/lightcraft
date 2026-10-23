@@ -15,17 +15,25 @@ pub type UiCommand = (&'static str, &'static str, Option<&'static str>, &'static
 /// has a matching menu command (also listed through the control channel). Tests check coverage.
 pub const LANGUAGE_COMMANDS: &[UiCommand] = &[
     ("app.language.english", crate::i18n::Locale::En.name(), None, "Edit>Language"),
-    ("app.language.simplifiedChinese", crate::i18n::Locale::ZhHans.name(), None, "Edit>Language"),
-    ("app.language.traditionalChinese", crate::i18n::Locale::ZhHant.name(), None, "Edit>Language"),
-    ("app.language.japanese", crate::i18n::Locale::Ja.name(), None, "Edit>Language"),
-    ("app.language.portuguese", crate::i18n::Locale::PtBr.name(), None, "Edit>Language"),
-    ("app.language.french", crate::i18n::Locale::Fr.name(), None, "Edit>Language"),
-    ("app.language.spanish", crate::i18n::Locale::Es.name(), None, "Edit>Language"),
+    // The picker order (`Locale::for_picker`): alphabetical by the language's own name after
+    // English; Cyrillic, Georgian, then CJK names follow the Latin ones. A test keeps them equal.
+    ("app.language.indonesian", crate::i18n::Locale::Id.name(), None, "Edit>Language"),
+    ("app.language.czech", crate::i18n::Locale::Cs.name(), None, "Edit>Language"),
     ("app.language.german", crate::i18n::Locale::De.name(), None, "Edit>Language"),
+    ("app.language.spanish", crate::i18n::Locale::Es.name(), None, "Edit>Language"),
+    ("app.language.french", crate::i18n::Locale::Fr.name(), None, "Edit>Language"),
+    ("app.language.italian", crate::i18n::Locale::It.name(), None, "Edit>Language"),
+    ("app.language.polish", crate::i18n::Locale::Pl.name(), None, "Edit>Language"),
+    ("app.language.portuguese", crate::i18n::Locale::PtBr.name(), None, "Edit>Language"),
+    ("app.language.finnish", crate::i18n::Locale::Fi.name(), None, "Edit>Language"),
+    ("app.language.swedish", crate::i18n::Locale::Sv.name(), None, "Edit>Language"),
+    ("app.language.vietnamese", crate::i18n::Locale::Vi.name(), None, "Edit>Language"),
     ("app.language.russian", crate::i18n::Locale::Ru.name(), None, "Edit>Language"),
     ("app.language.ukrainian", crate::i18n::Locale::Uk.name(), None, "Edit>Language"),
-    ("app.language.polish", crate::i18n::Locale::Pl.name(), None, "Edit>Language"),
-    ("app.language.czech", crate::i18n::Locale::Cs.name(), None, "Edit>Language"),
+    ("app.language.georgian", crate::i18n::Locale::Ka.name(), None, "Edit>Language"),
+    ("app.language.japanese", crate::i18n::Locale::Ja.name(), None, "Edit>Language"),
+    ("app.language.simplifiedChinese", crate::i18n::Locale::ZhHans.name(), None, "Edit>Language"),
+    ("app.language.traditionalChinese", crate::i18n::Locale::ZhHant.name(), None, "Edit>Language"),
 ];
 
 /// Every UI command: the languages, then everything else. `xtask parity` reads both tables from
@@ -50,6 +58,12 @@ pub fn language_from_command(id: &str) -> Option<crate::i18n::Locale> {
         "app.language.ukrainian" => Some(crate::i18n::Locale::Uk),
         "app.language.polish" => Some(crate::i18n::Locale::Pl),
         "app.language.czech" => Some(crate::i18n::Locale::Cs),
+        "app.language.italian" => Some(crate::i18n::Locale::It),
+        "app.language.georgian" => Some(crate::i18n::Locale::Ka),
+        "app.language.swedish" => Some(crate::i18n::Locale::Sv),
+        "app.language.finnish" => Some(crate::i18n::Locale::Fi),
+        "app.language.indonesian" => Some(crate::i18n::Locale::Id),
+        "app.language.vietnamese" => Some(crate::i18n::Locale::Vi),
         _ => None,
     }
 }
@@ -70,6 +84,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("view.people", "People", None, "View"),
     ("view.person", "Show Person", None, ""),
     ("view.faceBoxes", "Face Boxes", None, "View"),
+    ("view.focusPoint", "Show Focus Point", Some("Alt+F"), "View"),
+    ("view.zoomToFocus", "Zoom to Focus Point", None, "View"),
     ("view.reference", "Reference View", Some("Shift+R"), "View"),
     ("photo.setReference", "Set as Reference Photo", None, ""),
     ("compare.swap", "Swap Compare Photos", None, "View"),
@@ -78,6 +94,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("view.autoAdvance", "Auto Advance", None, "Photo"),
     ("view.filmstrip", "Filmstrip", Some("/"), "View"),
     ("view.leftPanel", "My Photos Panel", Some("Cmd+Shift+L"), "View"),
+    ("view.rightPanel", "Right Panel", None, "View"),
     ("view.beforeAfter", "Compare Before and After", Some("Y"), "View"),
     ("view.beforeAfterSplit", "Before/After Split", Some("Shift+Y"), "View"),
     ("view.beforeAfterTopBottom", "Before/After Top/Bottom", Some("Alt+Y"), "View"),
@@ -123,6 +140,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("view.lightsOut", "Lights Out", Some("Shift+L"), "View"),
     ("view.enterFullScreen", "Enter Full Screen", Some("Cmd+Shift+F"), "View"),
     ("view.infoOverlay", "Cycle Info Overlay", Some("Cmd+I"), "View"),
+    ("view.viewOptions", "View Options…", Some("Cmd+J"), "View"),
     ("view.chooseLayoutImage", "Choose Layout Image…", None, "View"),
     ("view.layoutImage", "Show Layout Image", Some("Cmd+Alt+O"), "View"),
     ("view.layoutImageOpacity", "Layout Image Opacity", None, ""),
@@ -192,6 +210,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("dialog.pasteSettings", "Paste Selected Settings…", Some("Cmd+Shift+V"), "Edit"),
     ("view.focusSearch", "Find…", Some("Cmd+F"), "Edit"),
     ("dialog.export", "Export…", None, "File"),
+    ("dialog.print", "Print…", Some("Cmd+P"), "File"),
+    ("app.print", "Print to PDF", None, ""),
     ("dialog.contactSheet", "Contact Sheet PDF…", None, "File"),
     ("app.contactSheet", "Export Contact Sheet PDF", None, ""),
     ("photo.editInPhotoCraft", "Edit in PhotoCraft", Some("Cmd+Shift+E"), "Photo>Edit In"),
@@ -249,6 +269,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("app.resetShortcuts", "Reset All Keyboard Shortcuts", None, ""),
     ("app.export", "Export Now", None, ""),
     ("app.showInFinder", "Show in Finder", Some("Cmd+R"), "Photo"),
+    ("app.showInFolders", "Show in Folders", None, "Photo"),
     ("app.openSamModelFolder", "Show in File Manager", None, ""),
     ("dialog.rename", "Rename Photos…", Some("F2"), "Photo"),
     ("dialog.labelNames", "Edit Color Label Names…", None, ""),
@@ -409,6 +430,10 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
         let ctx = app.tasks.repaint.clone().unwrap_or_default();
         return Some(crate::lightroom_import::command(app, id, p, &ctx));
     }
+    if id == "photo.reload" {
+        // the files are read in the background (a raw's decode takes a second or more)
+        return crate::reload::command(app, p);
+    }
     if let Some(language) = language_from_command(id) {
         app.ui.language = language;
         // Immediately, not on the next frame: the reply and anything else run this frame
@@ -535,6 +560,16 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             Ok(Value::Null)
         }
         "view.compare" => crate::panels::compare::enter_compare(app),
+        "view.focusPoint" => {
+            // {on?}; no params toggles. The camera's focus point (Sony, from the file) over the photo.
+            app.ui.settings.focus_point = p.get("on").and_then(Value::as_bool).unwrap_or(!app.ui.settings.focus_point);
+            Ok(json!({"on": app.ui.settings.focus_point}))
+        }
+        "view.zoomToFocus" => {
+            // {on?}; no params toggles. Toggle Zoom (Z) centres on the focus point when there is one.
+            app.ui.settings.zoom_to_focus = p.get("on").and_then(Value::as_bool).unwrap_or(!app.ui.settings.zoom_to_focus);
+            Ok(json!({"on": app.ui.settings.zoom_to_focus}))
+        }
         "view.faceBoxes" => {
             app.ui.face_boxes = p.get("show").and_then(Value::as_bool).unwrap_or(!app.ui.face_boxes);
             Ok(json!({"show": app.ui.face_boxes}))
@@ -565,12 +600,15 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
         "view.reference" => {
             // the reference: the one set before, else the active photo (the next one becomes active)
             let vis = app.session.visible_cloned();
-            let reference = app
-                .ui
-                .reference
-                .filter(|r| app.session.catalog.photo(lightcraft_catalog::PhotoId(*r)).is_some())
-                .or_else(|| app.session.active().map(|a| a.0));
-            let Some(r) = reference else { return Some(Err("select a photo to use as the reference".into())) };
+            let live = |id: u64| crate::panels::compare::live(app, lightcraft_catalog::PhotoId(id));
+            let active = app.session.active().map(|a| a.0);
+            let reference = app.ui.reference.filter(|r| live(*r)).or_else(|| active.filter(|a| live(*a)));
+            let Some(r) = reference else {
+                return Some(Err(match active {
+                    Some(a) => format!("photo {a} is in Recently Deleted: restore it to use it as the reference"),
+                    None => "select a photo to use as the reference".into(),
+                }));
+            };
             app.ui.reference = Some(r);
             if app.session.active().is_none_or(|a| a.0 == r)
                 && let Some(i) = vis.iter().position(|x| x.0 == r)
@@ -582,8 +620,21 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             Ok(json!({"reference": r, "active": app.session.active().map(|a| a.0)}))
         }
         "photo.setReference" => {
-            let id = p.get("id").and_then(Value::as_u64).or_else(|| app.session.active().map(|a| a.0));
-            app.ui.reference = id;
+            // only an absent (or null) `id` means the active photo; any other non-id is refused
+            let id = match p.get("id").filter(|v| !v.is_null()) {
+                Some(v) => match v.as_u64() {
+                    Some(id) => Some(id),
+                    None => return Some(Err(format!("photo.setReference: `id` must be a photo id, not {v}"))),
+                },
+                None => app.session.active().map(|a| a.0),
+            };
+            let Some(id) = id else { return Some(Err("select a photo to use as the reference".into())) };
+            match app.session.catalog.photo(lightcraft_catalog::PhotoId(id)) {
+                None => return Some(Err(format!("no photo {id}"))),
+                Some(p) if p.deleted => return Some(Err(format!("photo {id} is in Recently Deleted: restore it to use it as the reference"))),
+                Some(_) => {}
+            }
+            app.ui.reference = Some(id);
             Ok(json!({"reference": id}))
         }
         "compare.swap" => crate::panels::compare::swap(app),
@@ -594,7 +645,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
         "compare.makeSelect" => crate::panels::compare::make_select(app),
         "view.autoAdvance" => {
             app.ui.auto_advance = !app.ui.auto_advance;
-            app.toast(&ctx, if app.ui.auto_advance { "Auto Advance On" } else { "Auto Advance Off" });
+            app.toast(&ctx, crate::i18n::tr(if app.ui.auto_advance { "Auto Advance On" } else { "Auto Advance Off" }));
             Ok(json!({"autoAdvance": app.ui.auto_advance}))
         }
         "view.back" => {
@@ -614,7 +665,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 panel(app, &ctx, RightPanel::Crop, "Crop, Rotate, Geometry");
             } else if app.ui.view == ViewMode::People && app.ui.person_page.is_some() {
                 app.ui.person_page = None;
-            } else if matches!(app.ui.view, ViewMode::Compare | ViewMode::Survey) {
+            } else if matches!(app.ui.view, ViewMode::Compare | ViewMode::Survey | ViewMode::Reference) {
                 app.ui.view = ViewMode::Detail;
             } else if app.ui.view == ViewMode::Detail {
                 // a photo opened from a person's page (or the unnamed faces) goes back there, any other to the grid
@@ -687,8 +738,29 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 crate::state::InfoOverlay::Basic => "Info Overlay: File",
                 crate::state::InfoOverlay::Exposure => "Info Overlay: Exposure",
             };
-            app.toast(&ctx, label);
+            app.toast(&ctx, crate::i18n::tr(label));
             Ok(json!({"infoOverlay": app.ui.info_overlay}))
+        }
+        "view.viewOptions" => {
+            // `info1` / `info2` set the lines for an agent; without them the window opens
+            let mut info = app.ui.settings.loupe_info;
+            let mut set = false;
+            for (key, lines) in [("info1", &mut info.info1), ("info2", &mut info.info2)] {
+                let Some(v) = p.get(key) else { continue };
+                match serde_json::from_value(v.clone()) {
+                    Ok(v) => *lines = v,
+                    Err(_) => {
+                        return Some(Err(format!("`{key}`: three of none|fileName|captureDate|dimensions|exposure|camera|lens|cameraAndLens")));
+                    }
+                }
+                set = true;
+            }
+            if set {
+                app.ui.settings.loupe_info = info;
+            } else {
+                app.ui.dialog = Some(Dialog::ViewOptions);
+            }
+            Ok(json!({"loupeInfo": app.ui.settings.loupe_info}))
         }
         "view.chooseLayoutImage" => {
             let path = match p.get("path").and_then(Value::as_str) {
@@ -771,6 +843,31 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.left_panel = !app.ui.left_panel;
             Ok(Value::Null)
         }
+        "view.rightPanel" => {
+            // Classic's F8: hide the right panel, and bring back the same one next time (Edit when
+            // none was hidden). Hiding a tool ends it, as closing its panel does.
+            if app.ui.right != RightPanel::None && crate::docking::exposed(app, crate::docking::Panel::Tools) {
+                app.ui.right_hidden = app.ui.right;
+                app.ui.right = RightPanel::None;
+                if app.ui.tool != "wbPicker" {
+                    app.ui.tool.clear();
+                }
+                let _ = app.session.end_interaction();
+            } else {
+                let p = match std::mem::take(&mut app.ui.right_hidden) {
+                    RightPanel::None => RightPanel::Edit,
+                    p => p,
+                };
+                app.ui.right = p;
+                if p.is_edit_tool() && !matches!(app.ui.view, ViewMode::Detail) {
+                    app.ui.view = ViewMode::Detail;
+                }
+                if p == RightPanel::Remove && app.ui.tool.is_empty() {
+                    app.ui.tool = "remove".into();
+                }
+            }
+            Ok(json!({"open": app.ui.right != RightPanel::None}))
+        }
         "view.beforeAfter" => {
             app.ui.before_after = if app.ui.before_after == BeforeAfter::SideBySide { BeforeAfter::Off } else { BeforeAfter::SideBySide };
             Ok(Value::Null)
@@ -800,9 +897,18 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             Ok(Value::Null)
         }
         "view.zoomToggle" => {
-            // the same ratio a click on the photo zooms to
-            app.ui.zoom = if app.ui.zoom == Zoom::Fit { Zoom::Percent(app.ui.click_zoom as f32) } else { Zoom::Fit };
+            // the same ratio a click on the photo zooms to; zooming in centres on the camera's focus
+            // point when the photo has one (View ▸ Zoom to Focus Point)
+            let zoom_in = app.ui.zoom == Zoom::Fit;
+            app.ui.zoom = if zoom_in { Zoom::Percent(app.ui.click_zoom as f32) } else { Zoom::Fit };
             app.ui.zoom_anim = true;
+            if zoom_in
+                && app.ui.settings.zoom_to_focus
+                && let Some(pan) = app.session.active().and_then(|id| crate::panels::detail::focus_pan(app, id))
+            {
+                app.ui.pan = pan;
+                return Some(Ok(json!({"focus": [pan.0, pan.1]})));
+            }
             Ok(Value::Null)
         }
         "view.clickZoom" => {
@@ -1340,6 +1446,28 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             app.ui.dialog = Some(Dialog::ContactSheet { options: lightcraft_engine::contact_sheet::Options::default() });
             Ok(Value::Null)
         }
+        "dialog.print" => {
+            app.ui.print = Default::default();
+            app.ui.dialog = Some(Dialog::Print);
+            Ok(Value::Null)
+        }
+        "app.print" => {
+            if app.export.is_some() {
+                return Some(Err("an export is already running".into()));
+            }
+            let mut params = p.clone();
+            if p.get("path").is_none() {
+                let req = PickRequest::save("Print to PDF", "PDF", &["pdf"], "Print.pdf");
+                let paths = match crate::pick::ask(app, id, p, "path", req, |_| None) {
+                    Picked::Now(paths) => paths,
+                    Picked::Later => return Some(Ok(Value::Null)),
+                    Picked::Unavailable => return Some(Err("no save dialog on this platform; supply path".into())),
+                };
+                let Some(path) = paths.first() else { return Some(Ok(Value::Null)) };
+                params["path"] = json!(path);
+            }
+            crate::export_task::start_print(app, &params)
+        }
         "app.contactSheet" => {
             if app.export.is_some() {
                 return Some(Err("an export is already running".into()));
@@ -1361,7 +1489,8 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             let prev = app.session.last_export.clone().unwrap_or_default();
             let u = |k: &str, d: u64| prev.get(k).and_then(Value::as_u64).unwrap_or(d);
             let dir = prev.get("dir").and_then(Value::as_str).map(str::to_string).unwrap_or_else(crate::control::default_export_dir);
-            let opts = lightcraft_engine::export::ExportOptions::from_json(&prev);
+            // stored settings: a depth the format lacks (saved before #1952) opens at the format's own
+            let opts = lightcraft_engine::export::ExportOptions::from_json(&lightcraft_engine::export::ExportOptions::known_keys_only(&prev));
             // no previous export: 2048 px long edge; a previous full-size export: full size
             let full_size = opts.resize.is_none() && lightcraft_engine::export::ExportOptions::has_size_param(&prev);
             let resize = opts.resize.unwrap_or_default();
@@ -2057,6 +2186,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
         }
         "app.export" => crate::control::export_active(app, p),
         "app.showInFinder" => show_in_finder(app),
+        "app.showInFolders" => show_in_folders(app, p.get("id").and_then(Value::as_u64).map(lightcraft_catalog::PhotoId)),
         "app.openLogFolder" => open_log_folder(app),
         "app.discord" | "app.website" | "app.github" | "app.artcraft" | "app.help" | "app.feedback" => {
             let url = crate::links::url_of(id).unwrap_or(crate::links::WEBSITE);
@@ -2080,7 +2210,9 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
     match id {
         "library.selectOnlyActive" => app.session.active().is_some(),
         "view.thumbSizeUp" | "view.thumbSizeDown" => thumb_size_view(app),
-        "dialog.contactSheet" | "app.contactSheet" => !cfg!(target_arch = "wasm32") && app.session.active().is_some() && app.export.is_none(),
+        "dialog.contactSheet" | "app.contactSheet" | "dialog.print" | "app.print" => {
+            !cfg!(target_arch = "wasm32") && app.session.active().is_some() && app.export.is_none()
+        }
         "dialog.slideshowExport" | "app.slideshowExport" => {
             !cfg!(target_arch = "wasm32") && !app.session.slideshow_export.as_ref().is_some_and(|r| r.running())
         }
@@ -2093,12 +2225,13 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
         "app.exportPrevious" => app.session.active().is_some() && app.session.last_export.is_some(),
         "dialog.pasteSettings" => app.session.active().is_some() && app.session.clipboard.is_some(),
         "photo.openOriginalInExternal" => {
+            // only a file type LightCraft reads can be handed over (#2135); the extension alone
+            // decides, so no disk or share is touched while a menu is drawn
             app.services.open_with.is_some()
-                && app
-                    .session
-                    .active()
-                    .and_then(|id| app.session.catalog.photo(id))
-                    .is_some_and(|p| matches!(p.source, lightcraft_engine::catalog::Source::File { .. }))
+                && app.session.active().and_then(|id| app.session.catalog.photo(id)).is_some_and(|p| match &p.source {
+                    lightcraft_engine::catalog::Source::File { path } => lightcraft_engine::open_path::is_media(std::path::Path::new(path)),
+                    _ => false,
+                })
         }
         "app.showInFinder" => {
             app.services.reveal.is_some()
@@ -2108,6 +2241,7 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
                     .and_then(|id| app.session.catalog.photo(id))
                     .is_some_and(|p| matches!(p.source, lightcraft_engine::catalog::Source::File { .. }))
         }
+        "app.showInFolders" => show_in_folders_enabled(app, None),
         "app.openSamModelFolder" => app.session.segmenter.dir.is_some() && app.services.open_with.is_some(),
         "file.exportPresets" => app.session.presets.iter().any(|p| !p.builtin),
         "file.exportMaskEffects" => !app.session.mask_effects.is_empty(),
@@ -2124,7 +2258,7 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
         "compare.swap" | "compare.makeSelect" | "compare.set" => app.ui.view == ViewMode::Compare,
         "slideshow.togglePause" | "slideshow.next" | "slideshow.previous" | "slideshow.end" => app.ui.slideshow.is_some(),
         s if s.starts_with("dialog.merge") || (s.starts_with("merge.") && s.ends_with("Last")) => {
-            app.session.targets(&serde_json::json!({})).len() >= 2 && app.merge.final_task.is_none()
+            app.session.selected().len() >= 2 && app.merge.final_task.is_none()
         }
         _ => true,
     }
@@ -2176,7 +2310,7 @@ pub fn delete_in_album(app: &mut LightcraftApp, ctx: &egui::Context) -> bool {
         app.toast(ctx, crate::i18n::tr("Smart albums update automatically: change their rules, or use Photo ▸ Delete Photo"));
         return true;
     }
-    if app.session.targets(&json!({})).is_empty() {
+    if app.session.selected().is_empty() {
         return true;
     }
     match app.run("album.removePhotos", json!({"id": aid.0})) {
@@ -2197,7 +2331,7 @@ pub fn confirm_delete(app: &mut LightcraftApp) -> bool {
     if !app.ui.settings.confirm_delete {
         return false;
     }
-    let count = app.session.targets(&json!({})).len();
+    let count = app.session.selected().len();
     if count == 0 {
         return false;
     }
@@ -2237,6 +2371,39 @@ fn show_in_finder(app: &mut LightcraftApp) -> Result<Value, String> {
     Ok(json!({"path": path}))
 }
 
+/// The folder the active photo was imported from, as the sidebar's Folders section counts it (a
+/// photo straight in a disk's root is in the root). `None` for a demo scene, a photo only browsed
+/// in Local or in Recently Deleted, and one on the startup disk's root, which has no row to show.
+fn photo_folder(app: &LightcraftApp, id: Option<lightcraft_catalog::PhotoId>) -> Option<String> {
+    let photo = id.or_else(|| app.session.active()).and_then(|id| app.session.catalog.photo(id)).filter(|p| p.in_library())?;
+    let lightcraft_engine::catalog::Source::File { path } = &photo.source else { return None };
+    let dir = path.rfind(['/', '\\']).and_then(|i| path.get(..i.max(1)))?;
+    (!lightcraft_catalog::folders::is_startup_disk(dir)).then(|| dir.to_string())
+}
+
+/// Whether Show in Folders has a row to show for photo `id` (the active one when `None`): its
+/// folder must be a row of the tree, which stops `MAX_DEPTH` levels down. With no fresh tree to
+/// look in, the folder alone decides, and the command still checks.
+pub fn show_in_folders_enabled(app: &LightcraftApp, id: Option<lightcraft_catalog::PhotoId>) -> bool {
+    let Some(dir) = photo_folder(app, id) else { return false };
+    app.caches.folder_tree_if_fresh(&app.session.catalog).is_none_or(|tree| crate::panels::left::folder_row_of(&tree, &dir).is_some())
+}
+
+/// Photo ▸ Show in Folders (Lightroom's Go to Folder in Library): show the folder of photo `id`
+/// (the active one when `None`; the grid's menu passes the photo right-clicked) as a click on its
+/// row in the sidebar's Folders section does, and bring the row into view: the sidebar, the
+/// section and the folders above it open, and it scrolls there (`reveal_folder`).
+fn show_in_folders(app: &mut LightcraftApp, id: Option<lightcraft_catalog::PhotoId>) -> Result<Value, String> {
+    let dir = photo_folder(app, id).ok_or("this photo is not in a folder of the library")?;
+    let tree = app.caches.folder_tree(&app.session.catalog);
+    // the row's own spelling (forward slashes): what its click hands `library.source`, and its id
+    let path = crate::panels::left::folder_row_of(&tree, &dir).map(|n| n.path.clone()).ok_or("this photo's folder is not in Folders")?;
+    app.run("library.source", json!({"kind": "libraryFolder", "path": path}))?;
+    app.ui.left_panel = true;
+    app.ui.reveal_folder = Some(path.clone());
+    Ok(json!({"path": path}))
+}
+
 /// Photo ▸ Edit In: render a copy of each selected photo with its edits (stacked on its original)
 /// as Settings ▸ External Editing asks for that editor, then open them there. `p` may override the
 /// file (`format`, `colorSpace`, `bitDepth`) and the editor (`app`). PhotoCraft is checked first,
@@ -2273,8 +2440,15 @@ fn edit_in(app: &mut LightcraftApp, ctx: &egui::Context, p: &Value, photocraft: 
         if let Some(id) = id {
             app.ui.external_edits.push(*id);
         }
-        if let Some(Err(e)) = app.services.open_with.as_mut().map(|f| f(path, &editor)) {
-            failed = Some(e);
+        // the copy is LightCraft's own render, but it goes through the same gate as any other
+        // path handed to the system opener (#2135)
+        match lightcraft_engine::open_path::openable(path, "") {
+            Err(e) => failed = Some(e),
+            Ok(absolute) => {
+                if let Some(Err(e)) = app.services.open_with.as_mut().map(|f| f(&absolute, &editor)) {
+                    failed = Some(e);
+                }
+            }
         }
     }
     match (failed, copies.as_slice()) {
@@ -2315,7 +2489,7 @@ fn open_original_in(app: &mut LightcraftApp, ctx: &egui::Context, p: &Value) -> 
 }
 
 fn open_originals(app: &mut LightcraftApp, p: &Value) -> Result<Value, String> {
-    let mut ids = app.session.targets(p);
+    let mut ids = app.session.targets(p).map_err(|e| e.to_string())?;
     ids.dedup();
     if ids.is_empty() {
         return Err("no photo selected".into());
@@ -2326,11 +2500,13 @@ fn open_originals(app: &mut LightcraftApp, p: &Value) -> Result<Value, String> {
     let mut files = Vec::new();
     let mut skipped = Vec::new();
     for id in ids {
-        match app.session.catalog.photo(id).map(|ph| &ph.source) {
-            Some(lightcraft_engine::catalog::Source::File { path }) if std::path::Path::new(path).is_file() => files.push((id, path.clone())),
-            Some(lightcraft_engine::catalog::Source::File { path }) => {
-                skipped.push(json!({"id": id.0, "reason": format!("the original is missing: {path}")}))
-            }
+        // the path may come from an imported catalog: only a photo file LightCraft reads is
+        // handed to the opener, never a program (#2135)
+        match app.session.catalog.photo(id).map(|ph| (ph.file_name.clone(), ph.source.clone())) {
+            Some((name, lightcraft_engine::catalog::Source::File { path })) => match lightcraft_engine::open_path::openable(&path, &name) {
+                Ok(absolute) => files.push((id, absolute)),
+                Err(reason) => skipped.push(json!({"id": id.0, "reason": reason})),
+            },
             Some(_) => skipped.push(json!({"id": id.0, "reason": "a demo photo has no original file"})),
             None => skipped.push(json!({"id": id.0, "reason": "no such photo"})),
         }

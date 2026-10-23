@@ -134,6 +134,8 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "@Sidebar Sections",
             "view.photoCounts",
             "view.faceBoxes",
+            "view.focusPoint",
+            "view.zoomToFocus",
             "view.filmstrip",
             "view.histogram",
             "view.navigator",
@@ -176,6 +178,8 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "---",
             "compare.swap",
             "compare.makeSelect",
+            "---",
+            "view.viewOptions",
         ],
     ),
     (
@@ -208,7 +212,9 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "photo.saveMetadataToFile",
             "photo.readMetadataFromFile",
             "photo.reload",
+            "photo.readFocusPoints",
             "app.showInFinder",
+            "app.showInFolders",
             "dialog.rename",
             "dialog.captureTime",
             "photo.tagFromTracklog",
@@ -332,6 +338,8 @@ pub fn checked(app: &LightcraftApp, id: &str) -> Option<bool> {
         "view.reference" => Some(u.view == ViewMode::Reference),
         "view.leftPanel" => Some(u.left_panel),
         "view.faceBoxes" => Some(u.face_boxes),
+        "view.focusPoint" => Some(u.settings.focus_point),
+        "view.zoomToFocus" => Some(u.settings.zoom_to_focus),
         "view.filmstrip" => Some(u.filmstrip),
         "view.histogram" => Some(u.histogram),
         "view.clipping" => Some(u.show_clipping),
@@ -706,7 +714,7 @@ pub(crate) fn expanded(app: &LightcraftApp, name: &str) -> Option<Vec<MenuNode>>
             v
         }
         "Add to Album" => {
-            let targets = app.session.targets(&Value::Null);
+            let targets = app.session.selected();
             let sel = !targets.is_empty();
             // albums hold library photos (issue #684): a Local-only selection is told what to do first
             let local_only = crate::panels::grid::local_only(app, &targets);
@@ -957,9 +965,10 @@ pub fn show_in_window(app: &mut LightcraftApp, ui: &mut egui::Ui, max_width: f32
     }
     if let Some((id, params)) = clicked {
         let r = run_item(app, &id, params);
-        // an export that can't start (e.g. no folder) says why instead of doing nothing
+        // an export that can't start (e.g. no folder), or a backup / restore the host refuses
+        // (changes still unsaved, nothing stored in this browser), says why instead of doing nothing
         if let Err(e) = r
-            && matches!(id.as_str(), "app.export" | "app.exportPrevious")
+            && matches!(id.as_str(), "app.export" | "app.exportPrevious" | "file.backupLibrary" | "file.restoreLibrary")
         {
             app.toast(ui.ctx(), e);
         }
@@ -1039,6 +1048,7 @@ fn nodes_ui(ui: &mut egui::Ui, nodes: &[MenuNode], mac: bool, clicked: &mut Opti
                     b = b.shortcut_text(shortcut_text(sc, mac));
                 }
                 let r = ui.add_enabled(*enabled, b);
+                crate::widgets::register(ui.ctx(), format!("menuitem:{id}"), r.rect);
                 if *checked == Some(true) {
                     let t = crate::theme::Tokens::get(ui.ctx());
                     let c = egui::Rect::from_center_size(egui::pos2(r.rect.left() + 11.0, r.rect.center().y), egui::vec2(13.0, 13.0));
@@ -1383,6 +1393,30 @@ mod tests {
         let p = app.session.catalog.photo(id).unwrap();
         assert_eq!(p.file_name, "one-renamed.png");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A backup the host refuses (changes still unsaved, issue #1508) says why when started from
+    /// the menu, as a refused export does; the refusal used to reach only the control channel.
+    #[test]
+    fn a_refused_backup_from_the_menu_shows_why() {
+        // the host refuses, as the web one does while changes are still unsaved (issue #1508)
+        let refusal = "Backup not started: 1 change could not be saved to browser storage yet";
+        let services = crate::Services {
+            backup_library: Some(Box::new(move |_: &mut lightcraft_engine::Session| Err(refusal.to_string()))),
+            ..Default::default()
+        };
+        let app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), services);
+        let mut h = crate::headless::Headless::new(app, [1400.0, 900.0], 1.0);
+        let t = std::time::Duration::from_secs(30);
+        h.settle(t);
+        for id in ["menu:File", "menuitem:file.backupLibrary"] {
+            let r = h.request("ui.clickWidget", json!({"id": id}), t);
+            assert_eq!(r["ok"], true, "{id}: {r}");
+            h.step();
+        }
+        // (read at once: a toast keeps the UI repainting until it expires, so settling would outlive it)
+        let toast = h.app.ui.toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
+        assert!(toast.contains(refusal), "the refusal is shown: {toast:?}");
     }
 
     /// #1528: `file.findMissing` with `wait: true` must propagate folder validation and search

@@ -22,7 +22,7 @@ pub(crate) fn rename_preview(
 ) -> (Option<Vec<lightcraft_engine::rename::RenamePlan>>, usize) {
     use std::hash::{Hash, Hasher};
     type Rows = std::sync::Arc<std::sync::Mutex<Option<Vec<lightcraft_engine::rename::RenamePlan>>>>;
-    let ids = app.session.targets(&json!({}));
+    let ids = app.session.selected();
     let photos = lightcraft_engine::rename::rename_photos(&app.session.catalog, &ids);
     let total = photos.len();
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -71,7 +71,7 @@ fn watermark_preview(
     type Base = std::sync::Arc<std::sync::Mutex<(u8, Option<Result<lightcraft_raster::Rgba8, String>>)>>;
     type Shown = (u64, u8, lightcraft_engine::export::Watermark, usize, egui::TextureHandle);
     let t = Tokens::get(ui.ctx());
-    let Some(&id) = app.session.targets(&json!({})).first() else { return };
+    let Some(&id) = app.session.selected().first() else { return };
     let Some(photo) = app.session.catalog.photo(id).cloned() else { return };
     let (out_w, out_h) = lightcraft_engine::export::output_size(&photo, &lightcraft_engine::export::ExportOptions { resize, ..Default::default() });
     let export_short = out_w.min(out_h);
@@ -176,6 +176,7 @@ pub const WHATS_NEW: &str = include_str!("../../../../docs/whats-new.md");
 fn window_id(dialog: &Dialog) -> egui::Id {
     egui::Id::new(match dialog {
         Dialog::Import { .. } => "lightcraft-import-dialog",
+        Dialog::Print => "lightcraft-print-dialog",
         Dialog::Settings { .. } => "lightcraft-settings-dialog",
         _ => "lightcraft-dialog",
     })
@@ -254,9 +255,11 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::Export { .. } => "Export",
         Dialog::ContactSheet { .. } => "Contact Sheet PDF",
         Dialog::SlideshowExport { .. } => "Export Slideshow",
+        Dialog::Print => "Print",
         Dialog::Merge { opts } => opts.title(),
         Dialog::Settings { .. } => "Settings",
         Dialog::ConfirmDelete { .. } => "Delete Photos",
+        Dialog::MovePhotos { .. } => "Move Photos",
         Dialog::LightroomCatalog { .. } => "Lightroom Classic Catalog",
         Dialog::SaveEffect { .. } => "New Effect Preset",
         Dialog::ManageEffects { .. } => "Manage Effect Presets",
@@ -270,6 +273,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::SamModel { .. } => "Download the SAM 3 Model?",
         Dialog::About => "About LightCraft",
         Dialog::Shortcuts => "Keyboard Shortcuts",
+        Dialog::ViewOptions => "View Options",
     }
     .to_string();
     let frame = egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::symmetric(16, 12));
@@ -277,6 +281,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
     // own so the size it is given doesn't carry over to the other dialogs. Its content scrolls
     // rather than growing the window when the options below the grid get taller (e.g. Copy).
     let import = matches!(dlg, Dialog::Import { .. });
+    // The Print dialog sizes itself to the window and scrolls its settings column on its own.
+    let print = matches!(dlg, Dialog::Print);
     let window_id = window_id(&dlg);
     // Every other dialog fits the window (#781): its options scroll when they don't, and the title
     // bar and the button row stay outside the scroll area. The room they take is measured on the
@@ -306,6 +312,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
             Dialog::Import { .. } => crate::import::DIALOG_SIZE[0],
             Dialog::SmartRules { .. } => 680.0,
             Dialog::AllMetadata { .. } => 620.0,
+            Dialog::Print => 1100.0,
             Dialog::FaceModel { .. } => 460.0,
             Dialog::LightroomCatalog { .. } => 440.0,
             Dialog::ManageEffects { .. } => 560.0,
@@ -313,7 +320,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         })
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
-            body_h = dialog_body(ui, (!import).then_some(title.as_str()), body_max, |ui| match &mut dlg {
+            body_h = dialog_body(ui, (!import && !print).then_some(title.as_str()), body_max, |ui| match &mut dlg {
                 Dialog::AutoStack { gap } => {
                     ui.label(egui::RichText::new(crate::i18n::tr("Stack photos taken within this time of each other:")).color(t.text_label));
                     let r = ui.add(
@@ -463,7 +470,13 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         confirm = true;
                     }
                     let rules = app.session.view_rules();
-                    let n = app.session.catalog.query(&rules, &Default::default()).len();
+                    // counted when the library or the rules change (or, for "in the last…" rules, the minute), not every frame
+                    let now = (app.session.clock)();
+                    let minute = if rules.depends_on_now() { now.get(..16).unwrap_or(&now) } else { "" };
+                    let n = app.caches.dialog_count(&app.session.catalog, ("smartAlbum", format!("{rules:?}"), minute), || {
+                        lightcraft_catalog::rules::set_now(Some(now.clone()));
+                        app.session.catalog.query(&rules, &Default::default()).len()
+                    });
                     ui.label(egui::RichText::new(crate::i18n::tr_format!("Matches: {}", crate::i18n::filter_label(&rules, &app.session.catalog))).color(t.text_label));
                     ui.label(
                         egui::RichText::new(crate::i18n::tr_format!("{n} photo{} now · updates automatically as photos change", if n == 1 { "" } else { "s" }, n = n))
@@ -471,7 +484,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     );
                 }
                 Dialog::CaptureTime { mode, time, days, hours, minutes, zone } => {
-                    let n = app.session.targets(&json!({})).len();
+                    let n = app.session.selected().len();
                     field(ui, "Change", |ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         for (i, (label, m)) in [("Set date & time", "set"), ("Shift by", "shift"), ("Time zone", "zone")].iter().enumerate() {
@@ -555,7 +568,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     );
                 }
                 Dialog::Rename { template, start } => {
-                    let n = app.session.targets(&json!({})).len();
+                    let n = app.session.selected().len();
                     ui.label(egui::RichText::new(crate::i18n::tr_format!("{n} photo{}", if n == 1 { "" } else { "s" }, n = n)).color(t.text_dim));
                     let template_id = egui::Id::new("rename-template");
                     let tags_open = field(ui, "Template", |ui| {
@@ -637,7 +650,9 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                 }
                 Dialog::RenameKeyword { from, to } => {
-                    let n = app.session.catalog.photos().filter(|p| p.meta.keywords.iter().any(|k| lightcraft_catalog::keywords::is_under(k, from))).count();
+                    let n = app.caches.dialog_count(&app.session.catalog, ("renameKeyword", from.as_str()), || {
+                        app.session.catalog.photos().filter(|p| p.meta.keywords.iter().any(|k| lightcraft_catalog::keywords::is_under(k, from))).count()
+                    });
                     if dialog_field(ui, "field:keywordName", to, "New name") {
                         confirm = true;
                     }
@@ -653,11 +668,11 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         confirm = true;
                     }
                     let options: Vec<String> = app
-                        .session
-                        .catalog
-                        .keyword_suggestions(from, into, 12)
-                        .into_iter()
+                        .caches
+                        .suggestions(&app.session.catalog, from, into, 12)
+                        .iter()
                         .filter(|k| !from.iter().any(|f| lightcraft_catalog::keywords::is_under(k, f)))
+                        .cloned()
                         .collect();
                     ui.horizontal_wrapped(|ui| {
                         for k in options {
@@ -677,7 +692,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         confirm = true;
                     }
                     // as in Lightroom, the option is only there when something is selected
-                    if !*folder && !app.session.targets(&json!({})).is_empty() {
+                    if !*folder && !app.session.selected().is_empty() {
                         ui.add_space(6.0);
                         let r = ui.checkbox(include_selected, crate::i18n::tr("Include selected photos"));
                         crate::widgets::register(ui.ctx(), "check:albumIncludeSelected", r.rect);
@@ -696,7 +711,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 }
                 Dialog::CopySettings { groups } => group_checklist(ui, "copyGroup", groups),
                 Dialog::PasteSettings { groups } => {
-                    let n = app.session.targets(&json!({})).len();
+                    let n = app.session.selected().len();
                     ui.label(
                         egui::RichText::new(crate::i18n::tr_format!("Paste into {n} photo{} — only settings that were copied are pasted", if n == 1 { "" } else { "s" }, n = n))
                             .color(t.text_dim),
@@ -707,19 +722,19 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 Dialog::ContactSheet { options } => {
                     options.columns = options.columns.clamp(1, 8);
                     options.rows = options.rows.clamp(1, 10);
-                    let n = app.session.targets(&json!({})).len();
-                    ui.label(format!("{n} selected photos · {} pages", n.div_ceil(options.columns * options.rows)));
+                    let n = app.session.selected().len();
+                    ui.label(crate::i18n::tr_format!("{n} selected photos · {pages} pages", n = n, pages = n.div_ceil(options.columns * options.rows)));
                     field(ui, "Paper", |ui| {
                         crate::widgets::combo_box("contactSheetPaper").selected_text(&options.paper).show_ui(ui, |ui| {
                             ui.selectable_value(&mut options.paper, "a4".into(), "A4");
-                            ui.selectable_value(&mut options.paper, "letter".into(), "Letter");
+                            ui.selectable_value(&mut options.paper, "letter".into(), crate::i18n::tr("Letter"));
                         });
                     });
-                    ui.checkbox(&mut options.landscape, "Landscape");
+                    ui.checkbox(&mut options.landscape, crate::i18n::tr("Landscape"));
                     field(ui, "Columns", |ui| { ui.add(egui::DragValue::new(&mut options.columns).range(1..=8)); });
                     field(ui, "Rows", |ui| { ui.add(egui::DragValue::new(&mut options.rows).range(1..=10)); });
-                    ui.checkbox(&mut options.captions, "Filename captions");
-                    ui.label("150 dpi · sRGB · current edits · fit without cropping");
+                    ui.checkbox(&mut options.captions, crate::i18n::tr("Filename captions"));
+                    ui.label(crate::i18n::tr("150 dpi · sRGB · current edits · fit without cropping"));
                     ui.label(crate::i18n::tr("Choose a PDF destination after confirming. Print the PDF from your viewer."));
                 }
                 Dialog::Export { opts, full_size, resize, preset_name, limit_kb, dir } => {
@@ -789,8 +804,8 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         opts.bit_depth = Some(bd);
                     }
                     if matches!(opts.format, F::Jpeg | F::Tiff | F::Avif | F::Png | F::Jxl) {
-                        let tip = "Photos edited in HDR: JPEG with an HDR gain map (looks right everywhere, brighter highlights on HDR displays), AVIF as 10-bit, PNG and JPEG XL as 16-bit Rec. 2020 PQ; TIFF needs 32-bit float";
-                        ui.checkbox(&mut opts.hdr, "HDR output").on_hover_text(tip);
+                        let tip = crate::i18n::tr("Photos edited in HDR: JPEG with an HDR gain map (looks right everywhere, brighter highlights on HDR displays), AVIF as 10-bit, PNG and JPEG XL as 16-bit Rec. 2020 PQ; TIFF needs 32-bit float");
+                        ui.checkbox(&mut opts.hdr, crate::i18n::tr("HDR output")).on_hover_text(tip);
                         if opts.hdr && !opts.hdr_output() {
                             ui.label(egui::RichText::new(crate::i18n::tr("HDR TIFF needs 32-bit float.")).color(t.text_dim));
                         }
@@ -1216,6 +1231,15 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     ui.label(crate::i18n::tr_format!("Move {what} to Recently Deleted?", what = what));
                     ui.label(egui::RichText::new(crate::i18n::tr("They can be restored from Recently Deleted until it is emptied.")).color(t.text_dim));
                 }
+                Dialog::MovePhotos { ids, name, dont_ask, .. } => {
+                    let n = ids.len();
+                    ui.label(crate::i18n::tr_format!("Move {n} photo{} to “{}”?", if n == 1 { "" } else { "s" }, name, n = n));
+                    ui.label(egui::RichText::new(crate::i18n::tr("Their files and XMP sidecars move on disk. Edit → Undo moves them back.")).color(t.text_dim));
+                    ui.add_space(4.0);
+                    let c = ui.checkbox(dont_ask, crate::i18n::tr("Don't ask again"));
+                    crate::widgets::register(ui.ctx(), "check:moveDontAsk", c.rect);
+                    c.on_hover_text(crate::i18n::tr("Settings → Confirm before moving photos to another folder on disk turns it back on"));
+                }
                 d @ Dialog::SynchronizeFolder { .. } => crate::sync::body(app, ui, d),
                 Dialog::LightroomCatalog { folder, catalog } => {
                     ui.label(crate::i18n::tr("This is a Lightroom catalog, not a LightCraft library. Import it into a LightCraft library instead?"));
@@ -1267,11 +1291,13 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                                 crate::theme::font_credits(app.chinese_font.is_some())
                             ));
                             ui.add_space(10.0);
-                            let discord = egui::Button::new(egui::RichText::new(crate::i18n::tr("Join the ArtCraft Discord")).font(t.semibold(15.0)).color(egui::Color32::WHITE))
-                                .fill(t.accent)
-                                .min_size(egui::vec2(260.0, 34.0));
-                            let r = ui.add(discord).on_hover_text(crate::links::DISCORD);
-                            crate::widgets::register(ui.ctx(), "button:aboutDiscord", r.rect);
+                            let r = crate::button::Button::new("Join the ArtCraft Discord")
+                                .primary()
+                                .large()
+                                .min_width(260.0)
+                                .widget("button:aboutDiscord")
+                                .tooltip(crate::links::DISCORD)
+                                .show(ui);
                             if r.clicked() {
                                 let _ = crate::links::open(app, crate::links::DISCORD);
                             }
@@ -1290,19 +1316,21 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     }
                 }
                 Dialog::Shortcuts => crate::panels::keymap::body(app, ui, &t),
+                Dialog::ViewOptions => crate::panels::settings::view_options(app, ui, &t),
+                Dialog::Print => crate::print_view::body(app, ui, &t),
             });
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            // the confirm on the right with Cancel to its left (macOS and GNOME's order), filled with
+            // the accent when it is the dialog's primary action. The row spans the width the window
+            // gives its content this frame (its default width, or its content's if wider), so it
+            // reaches the edge without widening the window.
+            let row_w = ui.available_width().max(ui.min_rect().width()).max(1.0);
+            let row_h = ui.spacing().interact_size.y;
+            ui.allocate_ui_with_layout(egui::vec2(row_w, row_h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 // a model file LightCraft cannot use has nothing to confirm, nor has a dialog that
                 // only shows something (one Close, no Cancel / OK)
                 let unusable_model = matches!(&dlg, Dialog::DenoiseModel { info, .. } | Dialog::FaceModel { info, .. } if info["kind"] == "unsupported");
-                let informational = unusable_model
-                    || matches!(dlg, Dialog::LightroomResult { first: None, .. })
-                    || matches!(
-                        dlg,
-                        Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
-                            | Dialog::ManageEffects { .. }
-                    );
+                let informational = unusable_model || matches!(dlg, Dialog::LightroomResult { first: None, .. }) || only_shows(&dlg);
                 let sam = &app.session.segmenter;
                 let (sam_installed, sam_running, sam_failed) = (sam.installed(), sam.download_status().running, sam.download_status().error.is_some());
                 // no download location in this build: nothing to offer but the manual install
@@ -1313,13 +1341,6 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::LightroomResult { .. } => "Close",
                     _ => "Cancel",
                 };
-                if !informational {
-                    let r = ui.button(crate::i18n::tr(cancel));
-                    crate::widgets::register(ui.ctx(), "button:dialogCancel", r.rect);
-                    if r.clicked() {
-                        close = true;
-                    }
-                }
                 let add_label;
                 let ok = match &dlg {
                     Dialog::Import { opts } => {
@@ -1331,6 +1352,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::LightroomResult { first: Some(_), .. } => "Show in Library",
                     Dialog::ContactSheet { .. } => "Choose PDF…",
                     Dialog::SlideshowExport { .. } => "Export…",
+                    Dialog::Print => "Print to PDF…",
                     Dialog::Merge { .. } => "Merge",
                     Dialog::DenoiseModel { info, .. } if info["download"].is_string() => "Accept & Download",
                     Dialog::DenoiseModel { .. } => "Install",
@@ -1338,6 +1360,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::FaceModel { .. } if !informational => "Install",
                     Dialog::ConfirmDelete { .. } | Dialog::DeleteKeyword { .. } | Dialog::DeleteEffects { .. } => "Delete",
                     Dialog::SaveEffect { .. } => "Create",
+                    Dialog::MovePhotos { .. } => "Move",
                     // (not "Merge": that is photo merging, HDR / panorama, in some languages)
                     Dialog::MoveKeyword { .. } => "Merge Keywords",
                     Dialog::KeywordSet { .. } => "Save",
@@ -1345,6 +1368,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                     Dialog::KeywordTag { .. } => "Save",
                     Dialog::RemoveFolder { .. } => "Remove",
                     Dialog::LightroomCatalog { .. } => "Import Lightroom Catalog…",
+                    Dialog::SynchronizeFolder { .. } if informational => "Close",
                     Dialog::SynchronizeFolder { .. } => "Synchronize",
                     Dialog::SamModel { then: Some(_), .. } if sam_installed => "Continue",
                     Dialog::SamModel { .. } if sam_installed || sam_running || sam_nowhere => "",
@@ -1371,10 +1395,32 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         )
                             // smart-album rules that can't mean anything wait to be fixed
                             && !matches!(&dlg, Dialog::SmartRules { id, rules, .. } if !rules.check_for(&app.session.catalog, id.map(lightcraft_catalog::AlbumId)).is_empty()));
-                let r = (!ok.is_empty()).then(|| ui.add_enabled(can_confirm, egui::Button::new(crate::i18n::tr(ok))));
-                if let Some(r) = &r {
-                    crate::widgets::register(ui.ctx(), "button:dialogOk", r.rect);
+                let primary = !informational && can_confirm && confirm_style(&dlg) == ConfirmStyle::Primary;
+                use crate::button::{Button, Kind};
+                // (each kind of dialog its own buttons: the keyboard's place doesn't carry from a
+                // dialog to the one it opens)
+                let kind = std::mem::discriminant(&dlg);
+                let cancel_button = Button::new(cancel).widget("button:dialogCancel").id_salt(kind).min_width(72.0);
+                let ok_button = Button::new(ok)
+                    .kind(if primary { Kind::Primary } else { Kind::Secondary })
+                    .enabled(can_confirm)
+                    .widget("button:dialogOk")
+                    .id_salt(kind)
+                    .min_width(72.0);
+                // (Cancel first, then the confirm: the keyboard goes through them as the eye does)
+                let gap = ui.spacing().item_spacing.x;
+                let mut buttons_w = 0.0;
+                if !informational {
+                    buttons_w += cancel_button.desired_size(ui).x + gap;
                 }
+                if !ok.is_empty() {
+                    buttons_w += ok_button.desired_size(ui).x;
+                }
+                ui.add_space((ui.available_width() - buttons_w).max(0.0));
+                if !informational && cancel_button.show(ui).clicked() {
+                    close = true;
+                }
+                let r = (!ok.is_empty()).then(|| ok_button.show(ui));
                 if r.is_some_and(|r| r.clicked()) {
                     if informational {
                         close = true;
@@ -1419,6 +1465,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         | Dialog::Export { .. }
                         | Dialog::ContactSheet { .. }
                         | Dialog::SlideshowExport { .. }
+                        | Dialog::Print
                         | Dialog::NewAlbum { .. }
                         | Dialog::NewSmartAlbum { .. }
                         | Dialog::SmartRules { .. }
@@ -1439,6 +1486,18 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
             Ok(r) if matches!(dlg, Dialog::NewAlbum { .. }) && r.get("skipped").and_then(serde_json::Value::as_u64).is_some_and(|n| n > 0) => {
                 // albums hold library photos (issue #684): say which part of the selection stayed out
                 crate::panels::grid::toast_skipped(app, ctx, &r);
+                close = true;
+            }
+            // a move says how it went, or why nothing moved
+            Ok(r) if matches!(dlg, Dialog::MovePhotos { .. }) => {
+                if let Dialog::MovePhotos { name, .. } = &dlg {
+                    let text = crate::panels::left::moved_text(r["moved"].as_u64().unwrap_or(0), name);
+                    app.toast(ctx, text);
+                }
+                close = true;
+            }
+            Err(e) if matches!(dlg, Dialog::MovePhotos { .. }) => {
+                app.toast(ctx, e);
                 close = true;
             }
             Ok(_) if keeps_open(app, &dlg) => {
@@ -1846,6 +1905,7 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         ),
         Dialog::ContactSheet { options } => app.run("app.contactSheet", json!(options)),
         Dialog::SlideshowExport { settings } => app.run("app.slideshowExport", json!(settings)),
+        Dialog::Print => app.run("app.print", json!({})),
         Dialog::CopySettings { groups } => app.run("develop.copy", json!({"groups": groups})),
         Dialog::PasteSettings { groups } => app.run("develop.paste", json!({"groups": groups})),
         Dialog::Export { opts, full_size, resize, limit_kb, dir, .. } => {
@@ -1857,6 +1917,17 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         Dialog::Merge { opts } => crate::merge::start_final(app, opts),
         Dialog::Import { opts } => crate::import::start(app, opts),
         Dialog::ConfirmDelete { .. } => app.run("photo.delete", json!({})),
+        Dialog::MovePhotos { ids, folder, dont_ask, library, .. } => {
+            // another library opened meanwhile (from the menu bar, an agent): these numbers are
+            // other photos there
+            if *library != app.session.library_generation() {
+                return Err(crate::i18n::tr("Another library was opened since the photos were dropped: nothing was moved").to_string());
+            }
+            if *dont_ask {
+                app.ui.settings.ask_before_move = false;
+            }
+            crate::panels::left::move_photos(app, Some(ids), folder).map(|n| json!({"moved": n}))
+        }
         // the catalog found: no file dialog; none: File ▸ Import Lightroom Catalog… asks for it
         Dialog::LightroomCatalog { catalog, .. } => {
             app.run("file.importLightroom", catalog.as_ref().map_or_else(|| json!({}), |c| json!({"path": c})))
@@ -1867,7 +1938,9 @@ pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_jso
         Dialog::DeleteEffects { names } => app.run("mask.deleteEffect", json!({"names": names})),
         Dialog::RemoveFolder { path, disk, .. } => app.run("library.removeFolder", json!({"path": path, "disk": disk})),
         d @ Dialog::SynchronizeFolder { .. } => crate::sync::confirm(app, d),
-        Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::ManageEffects { .. } => Ok(serde_json::Value::Null),
+        Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::ManageEffects { .. } | Dialog::ViewOptions => {
+            Ok(serde_json::Value::Null)
+        }
     }
 }
 
@@ -1945,12 +2018,13 @@ const PPI: ControlSpec = spec("export.ppi", "Resolution (ppi)", 1.0, 1200.0, 240
 /// Image Sizing: full size, or a resize mode and its value(s), don't enlarge, ppi.
 fn export_size(ui: &mut egui::Ui, full: &mut bool, r: &mut lightcraft_engine::export::Resize, ppi: &mut u16) {
     use lightcraft_engine::export::ResizeMode as R;
-    const MODES: [(R, &str); 7] = [
+    const MODES: [(R, &str); 8] = [
         (R::LongEdge, "Long Edge"),
         (R::ShortEdge, "Short Edge"),
         (R::Width, "Width"),
         (R::Height, "Height"),
-        (R::Dimensions, "Width × Height"),
+        (R::WidthHeight, "Width & Height"),
+        (R::Dimensions, "Dimensions"),
         (R::Megapixels, "Megapixels"),
         (R::Percent, "Percentage"),
     ];
@@ -1974,7 +2048,7 @@ fn export_size(ui: &mut egui::Ui, full: &mut bool, r: &mut lightcraft_engine::ex
                     _ if matches!(before, R::Megapixels | R::Percent) => 2048.0,
                     _ => r.value,
                 };
-                if r.mode == R::Dimensions && r.height == 0 {
+                if matches!(r.mode, R::Dimensions | R::WidthHeight) && r.height == 0 {
                     r.height = r.value as u32;
                 }
             }
@@ -1983,13 +2057,13 @@ fn export_size(ui: &mut egui::Ui, full: &mut bool, r: &mut lightcraft_engine::ex
         let spec = match r.mode {
             R::Megapixels => &SIZE_MP,
             R::Percent => &SIZE_PCT,
-            R::Dimensions => &SIZE_W,
+            R::Dimensions | R::WidthHeight => &SIZE_W,
             _ => &SIZE_PX,
         };
         if num(ui, spec, &mut v) {
             r.value = v as f32;
         }
-        if r.mode == R::Dimensions {
+        if matches!(r.mode, R::Dimensions | R::WidthHeight) {
             let mut h = r.height as f64;
             if num(ui, &SIZE_H, &mut h) {
                 r.height = h as u32;
@@ -2215,4 +2289,39 @@ mod watermark_position_tests {
             assert_eq!(WM_POSITIONS.iter().filter(|(position, _)| *position == anchor).count(), 1);
         }
     }
+}
+
+/// How a dialog's confirm button looks: [`ConfirmStyle::Primary`] (the accent's fill) when it
+/// makes or brings in something, plain when it deletes or removes (never the eye-catching
+/// default) or when the dialog only shows something (its Close).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmStyle {
+    Primary,
+    Plain,
+}
+
+pub fn confirm_style(dlg: &Dialog) -> ConfirmStyle {
+    match dlg {
+        Dialog::ConfirmDelete { .. } | Dialog::DeleteKeyword { .. } | Dialog::DeleteEffects { .. } | Dialog::RemoveFolder { .. } => {
+            ConfirmStyle::Plain
+        }
+        _ if only_shows(dlg) => ConfirmStyle::Plain,
+        _ => ConfirmStyle::Primary,
+    }
+}
+
+/// A dialog that only shows something: one Close, nothing to confirm or cancel. (Synchronize
+/// Folder is one when its folder turned out up to date.)
+fn only_shows(dlg: &Dialog) -> bool {
+    matches!(
+        dlg,
+        Dialog::About
+            | Dialog::Shortcuts
+            | Dialog::Settings { .. }
+            | Dialog::SystemInfo { .. }
+            | Dialog::AllMetadata { .. }
+            | Dialog::WhatsNew
+            | Dialog::ManageEffects { .. }
+            | Dialog::ViewOptions
+    ) || matches!(dlg, Dialog::SynchronizeFolder { counts: Some(c), .. } if c.up_to_date())
 }

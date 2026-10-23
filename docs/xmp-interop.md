@@ -10,7 +10,7 @@ other tools), and let LightCraft pick up edits made elsewhere.
 |---|---|
 | Name | `<stem>.xmp` by default (`IMG_0001.CR3` → `IMG_0001.xmp`); `<file>.xmp` (`IMG_0001.CR3.xmp`) with `naming: "full"`. Reading accepts either (preferred first) and `.XMP`. With stem naming, files sharing a stem don't share a sidecar: see *Shared names* below. |
 | Write | `photo.saveMetadataToFile {ids?}` (Photo ▸ Save Metadata to File, ⌘S), or automatically after every change with `library.xmpPreferences {autoWrite: true}` (File ▸ Automatically Write Changes into XMP). Slider drags are written once, when the drag ends; undo/redo rewrite the sidecar. An existing sidecar is **merged into, never replaced** (see *Saving into an existing sidecar*). Written atomically (temp file, fsync, rename). The result lists `written`, `merged` and `backups`. |
-| Read | On import (`library.import`, the report counts `sidecars`), and `photo.readMetadataFromFile {ids?}` (one undo step). For raw/DNG files without a sidecar, the XMP embedded in the file is used. `photo.readMetadataFromFile` never writes the sidecar, even with auto-write on: writing back what it has just read would add `lc:settings`, which later reads prefer over another app's `crs:` edits (issue #934). |
+| Read | On import (`library.import`, the report counts `sidecars`), and `photo.readMetadataFromFile {ids?}` (one undo step). Manual rereading uses embedded XMP in raw/DNG and JPEG files when no sidecar exists. A discovered sidecar that cannot be read or parsed is reported in `failed`, without applying embedded values. `photo.readMetadataFromFile` never writes the sidecar, even with auto-write on: writing back what it has just read would add `lc:settings`, which later reads prefer over another app's `crs:` edits (issue #934). A file arriving in an import is ranked as if it were catalogued already: it reads its own `<file>.xmp` when another file of its stem (a raw first) owns the shared stem sidecar (issue #1905). |
 | Preferences | `library.xmpPreferences {autoWrite?, naming?: stem\|full}`, stored in the library's `prefs.json`. |
 
 What we write (standard namespaces, so other tools can read the metadata):
@@ -40,6 +40,29 @@ used — on import (it then also files a copied photo in its date folder) and by
 When foreign `crs:` settings are only partly transferable, `library.import` includes per-photo `warnings` in its
 report. Warnings identify unsupported profile names, saved Upright geometry that will be recalculated, and other
 unmapped adjustments; they do not change the source packet or become catalog edits.
+
+Manual rereading and undo leave the JPEG original unchanged. Manual rereading also leaves sidecar files unchanged,
+even with automatic XMP writing on. With automatic XMP writing off (the default), undo/redo leave sidecars unchanged;
+with it enabled, subsequent edits and undo/redo can trigger the existing sidecar writer. `photo.allMetadata` uses
+its already loaded file bytes for embedded XMP, with an existing sidecar taking precedence.
+
+Manual JPEG rereading uses the first standard XMP APP1 before the first SOS (scan) or EOI (end) marker.
+Scanning is limited to a 16 MiB header span, including SOI, segment headers and skipped payloads, and 4096
+marker/fill steps after SOI. Non-APP1 payloads are skipped without loading them. Each APP1 payload must be
+complete and is at most 65,533 bytes. Header extraction succeeds for the first complete
+standard XMP packet within both limits, including a packet ending exactly at either limit; otherwise it
+fails without a whole-file fallback, including on I/O errors or an incomplete APP1 whose available bytes
+form parseable XMP. A valid JPEG with
+XMP beyond those limits therefore cannot be manually reread through this path. Extended XMP assembly and
+packets between scans are not supported by manual JPEG rereading.
+
+Packet completeness is stricter than the shared best-effort JPEG extractor; it is not strict whole-JPEG
+validation. A complete early XMP packet can be returned without examining the remaining file. Import and
+`photo.allMetadata` retain their existing extraction paths. Command regressions in
+`crates/engine/src/tests_xmp.rs` cover metadata/undo and sidecar precedence, an over-nested XMP packet and a
+truncated APP1 without an XMP signature. Separate reader cases in `sidecar::jpeg_header_tests` use small
+counted readers and injected limits for span/step boundaries, complete versus truncated APP1, early stopping,
+short reads and I/O errors.
 
 ## Saving into an existing sidecar
 
@@ -73,6 +96,10 @@ With stem naming, `IMG_0001.CR3` and `IMG_0001.JPG` map to the same `IMG_0001.xm
 library share a stem, the stem sidecar belongs to one of them — a raw first, otherwise the first by file name — and
 the others write and read `<file>.xmp` (`IMG_0001.JPG.xmp`), falling back to the stem sidecar for reading when they
 have none. So saving one photo never overwrites the other's metadata (`Session::sidecar_naming`).
+
+An import ranks the files it is adding the same way, before they are catalogued: a TIFF or JPEG arriving beside a
+raw of its stem reads its own `<file>.xmp` and takes nothing from the raw's `IMG_0001.xmp`, whether it arrives
+with the raw or after it (issue #1905).
 
 ## Face regions (MWG)
 
@@ -147,7 +174,18 @@ Values pass through our control specs, so anything outside our slider ranges get
 
 `crs:CameraProfile` is kept as the selected name in the photo's import warning and the active profile is left as it is: the name carries no rendering data and never selects an Adobe profile. Import reports such a profile as not applied (colours may differ from Lightroom), except Lightroom's default profiles (`Adobe Standard`, `Adobe Color`), which every sidecar names and which LightCraft's own starting look stands in for.
 
-**Not mapped:** camera profiles and looks (`CameraProfile`, `Look`; we have our own profile set), red eye, lens blur,
+**Profiles named by presets (`Look`, issue #1001).** A preset keeps the profile it names (`crs:Look`: `Name`, `Group`,
+`UUID`, `Amount`; in `.lrtemplate` files the `Look` table) as `profile.look` in its settings. When the user has imported
+a profile of that name (`profile.import`; the name compared ignoring case and repeated spaces, the group breaking
+ties), applying the preset selects it at the look's amount (`Amount` 1 = 100 %). Lightroom's basic profiles map to our
+own (`Adobe Color` → Color, `Adobe Neutral`, `Adobe Vivid`, `Adobe Landscape`, `Adobe Portrait`, `Adobe Monochrome`
+→ Monochrome). Any other `Adobe …` / `Camera …` profile and the numbered creative ones (`Artistic 01`, `B&W 05`,
+`Modern 10`, `Vintage 02`) can't be used here, and a third-party profile not imported yet leaves the photo's profile as it
+is; import reports either per preset (`Profile “Name” (Lightroom's own)` / `(not imported yet)` in `unmapped`).
+References are resolved again whenever profiles are imported or deleted, so a pack's profiles and presets can come in
+either order. The look's embedded `Parameters` are not read.
+
+**Not mapped:** camera profiles (`CameraProfile`; we have our own profile set), red eye, lens blur,
 process-version 2010 field names, and AI features. Local adjustments and spot removal are read as described below.
 
 ## Spot removal
@@ -181,11 +219,12 @@ mask: `CorrectionName` → name, `CorrectionAmount` → Amount, inactive correct
 | `LocalExposure2012` | `adjust.exposure` | stored as a fraction, ×4 EV |
 | `LocalContrast2012`, `LocalHighlights2012`, `LocalShadows2012`, `LocalWhites2012`, `LocalBlacks2012`, `LocalClarity2012`, `LocalTexture`, `LocalDehaze`, `LocalTemperature`, `LocalTint`, `LocalSaturation`, `LocalHue`, `LocalSharpness`, `LocalLuminanceNoise`, `LocalMoire`, `LocalDefringe`, `LocalToningSaturation` | the matching `adjust.*` | stored −1..1, ×100 |
 | `LocalToningHue` | `adjust.color_hue` | degrees |
+| other `Local*` sliders (`LocalGrain`…) | — | no counterpart in our masks: reported as `Mask: LocalGrain` when set (`LocalCurveRefineSaturation` 100 is neutral) |
 | `Mask/Gradient` (`FullX/Y`, `ZeroX/Y`) | linear gradient | full effect at the Full point |
 | `Mask/CircularGradient` (`Top/Left/Bottom/Right`, `Angle`, `Feather`, `Flipped`) | radial gradient | box fractions → long-edge radii (presets assume 3:2; sidecars use the photo's shape). `Flipped="true"` means effect inside: in `MaskGroupBasedCorrections` with `Version` 2 (what Lightroom writes for an ordinary radial) and in the legacy `CircularGradientBasedCorrections` Radial Filter, whose default (no `Flipped`) is outside. A `MaskGroupBasedCorrections` radial without `Version` is inside whatever `Flipped` says, and its `Feather` is halved (Lightroom rescales it that way when it upgrades one). Inverting is `MaskInverted` |
 | `Mask/Paint` (`Dabs` "d x y", `Radius`, `Flow`, `CenterWeight`, `MaskValue`) | brush | one brush component per correction; `MaskValue` ≤ 0 erases |
 | `Mask/Image` `MaskSubType` 1 / 2 | Subject / Sky | other AI selections are reported, not guessed |
-| `Mask/RangeMask` `Type` 2 / 3 (`LumRange`, `DepthRange`) | luminance / depth range | lightness converted to our range scale; colour ranges are reported |
+| `Mask/RangeMask` `Type` 2 / 3 (`LumRange`, `DepthRange`) | luminance / depth range | lightness converted to our range scale; a range at full strength at white (third `LumRange` value 1) stays open above our scene white; colour ranges are reported |
 | `MaskBlendMode` 0 / 1 / 2, `MaskInverted` | add / subtract / intersect, invert | |
 
 Applying a preset adds its masks to the photo's own (masks the photo already has are not added twice), and the Amount
@@ -230,7 +269,7 @@ mask's kind: the next brush / linear / radial / … mask starts with it (`mask.t
 |---|---|
 | Ours: `.lcpreset` | JSON `{"format": "lightcraft.preset", "version": 1, "presets": [{id, name, group, settings}]}`, where `settings` is a partial develop-settings object (only the groups the preset includes). A file can hold one preset or many, and every preset keeps its group. Import also accepts a bare preset object or an array of them. |
 | Export | `preset.export {path, ids?, group?}`: all user presets by default, or the given ids or one group. In the app: File ▸ Export Presets…, Presets panel ▸ ⋯ ▸ Export User Presets…, or right-click a group ▸ Export Group…. |
-| Import | `preset.import {paths, group?, dryRun?}`: files or folders (recursive): `.lcpreset`, `.xmp`, classic `.lrtemplate` (a Lua table: `value.settings` holds the same field names as `crs:`), photos that carry their edits in XMP ("DNG presets" from mobile apps; their crop, geometry and custom white balance are left out) and `.zip` bundles of any of these. Local adjustment (brush) presets — Lightroom Classic's `.lrtemplate` with `type = "LocalizedAdjustmentPreset"`, Camera Raw's local-correction `.xmp`, our `.lceffect`, also inside zips — become mask effects (`mask.effects`) instead (see *Local adjustment presets* below); the result lists them under `effects`, and divider presets under `effectDividers`. Presets in a folder (or a folder inside a zip) go to a group named after it, unless the file names its own group. The result lists, per preset, the settings that couldn't be carried over (`unmapped`, e.g. `CameraProfile`, `Look`, local masks), and the app's toast names them; fields that only describe the preset or the photo (`Cluster`, `SortName`, `Description`, `SupportsAmount2`, `RequiresRGBTables`, `CropConstrainToWarp`, `OverrideLookVignette`, `AsShotTemperature` / `AsShotTint`, empty `PointColors` slots) aren't listed. Older (process version 2010) fields — `Exposure`, `Contrast`, `FillLight`, `HighlightRecovery`, `Shadows`, `Brightness`, `Clarity`, `ToneCurve` — are approximated with today's sliders when a preset has no 2012-era fields. Dropping preset files on the window imports them too. In the app: File ▸ Import Presets…, or Presets panel ▸ ⋯ ▸ Import Presets…. A preset that's already there (same name, group and settings) is skipped. If an id clashes, the import gets a fresh `user.*` id, and built-in presets are never replaced. |
+| Import | `preset.import {paths, group?, dryRun?}`: files or folders (recursive): `.lcpreset`, `.xmp`, classic `.lrtemplate` (a Lua table: `value.settings` holds the same field names as `crs:`), photos that carry their edits in XMP ("DNG presets" from mobile apps; their crop, geometry and custom white balance are left out) and `.zip` bundles of any of these. Local adjustment (brush) presets — Lightroom Classic's `.lrtemplate` with `type = "LocalizedAdjustmentPreset"`, Camera Raw's local-correction `.xmp`, our `.lceffect`, also inside zips — become mask effects (`mask.effects`) instead (see *Local adjustment presets* below); the result lists them under `effects`, and divider presets under `effectDividers`. Presets in a folder (or a folder inside a zip) go to a group named after it, unless the file names its own group. The result lists, per preset, the settings that couldn't be carried over (`unmapped`, e.g. `CameraProfile`, a profile named by `Look` that isn't imported, local masks), and the app's toast names them; fields that only describe the preset or the photo (`Cluster`, `SortName`, `Description`, `SupportsAmount2`, `RequiresRGBTables`, `CropConstrainToWarp`, `OverrideLookVignette`, `AsShotTemperature` / `AsShotTint`, empty `PointColors` slots) aren't listed. Older (process version 2010) fields — `Exposure`, `Contrast`, `FillLight`, `HighlightRecovery`, `Shadows`, `Brightness`, `Clarity`, `ToneCurve` — are approximated with today's sliders when a preset has no 2012-era fields. Dropping preset files on the window imports them too. In the app: File ▸ Import Presets…, or Presets panel ▸ ⋯ ▸ Import Presets…. A preset that's already there (same name, group and settings) is skipped. If an id clashes, the import gets a fresh `user.*` id, and built-in presets are never replaced. |
 | XMP presets | Read with the `crs:` table above, with `crs:Name` as the name (falling back to the file name) and `crs:Group` as the group (falling back to "Imported Presets"). Only the fields the preset sets are included, so applying it leaves everything else alone and the Amount slider scales it like any other preset. We only read XMP presets; we don't write them. |
 
 LightCraft ships no third-party presets. Its built-in presets are its own values (`crates/engine/src/presets.rs`).

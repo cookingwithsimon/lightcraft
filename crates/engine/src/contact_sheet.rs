@@ -83,7 +83,7 @@ pub fn prepare(session: &mut Session, p: &Value) -> Result<Prepared, String> {
     if p.get("id").is_some_and(|v| v.as_u64().is_none()) {
         return Err("id must be a photo id".into());
     }
-    let ids = session.targets(p);
+    let ids = session.targets(p).map_err(|e| e.to_string())?;
     if ids.is_empty() || ids.len() > 1000 {
         return Err("select between 1 and 1000 photos".into());
     }

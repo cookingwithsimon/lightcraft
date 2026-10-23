@@ -82,7 +82,7 @@ fn name_faces(s: &mut Session, p: &Value) -> Result<Value> {
 /// makes the face yours: a later "Detect Faces" run no longer replaces it.
 fn set_name(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "faces.setName";
-    let id = p.get("id").and_then(Value::as_u64).map(lightcraft_catalog::PhotoId).or_else(|| s.active()).ok_or_else(|| bad(C, "no photo"))?;
+    let id = super::photo_id(p, C)?.or_else(|| s.active()).ok_or_else(|| bad(C, "no photo"))?;
     let index = p.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()).ok_or_else(|| bad(C, "missing or invalid `index`"))?;
     let name = name_param(p, C)?;
     let mut meta = s.catalog.photo(id).ok_or_else(|| bad(C, "no such photo"))?.meta.clone();
@@ -321,6 +321,8 @@ mod imp {
             return Ok(e.clone());
         }
         let embedder = Arc::new(Embedder::load(&dir.join(&id).join("model.onnx"), &installed.manifest).map_err(|e| bad(cmd, e.to_string()))?);
+        let net = embedder.clone();
+        super::super::face_detect::offer_gpu(s, "recognition", move |gpu| net.accelerate(gpu, true).map_err(|e| e.to_string()));
         let dim = match installed.manifest.output {
             lightcraft_faces::OutputSpec::Embedding { dim } => dim as usize,
             _ => return Err(bad(cmd, "the chosen model is not a recognition model")),
@@ -468,8 +470,7 @@ mod imp {
         let embedder = current(s, C)?;
         collect(s);
         let budget = Duration::from_millis(p.get("budgetMs").and_then(Value::as_u64).unwrap_or(200).min(600_000));
-        let first: Vec<PhotoId> =
-            p.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(PhotoId).collect()).unwrap_or_default();
+        let first: Vec<PhotoId> = super::super::photo_ids(p, C)?.unwrap_or_default();
         let todo = pending(s, &first, false);
         let started = Instant::now();
         let (mut embedded, mut failed, mut done) = (0, 0, 0);
@@ -507,13 +508,12 @@ mod imp {
         if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
             return None;
         }
-        // days from civil (proleptic Gregorian)
-        let y = if m <= 2 { y - 1 } else { y };
-        let era = y.div_euclid(400);
-        let yoe = y - era * 400;
-        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3600 + mm * 60 + ss)
+        // Days since 1970-01-01 (proleptic Gregorian); a day past the month's length rolls over as
+        // the old Hinnant arithmetic did.
+        let first = chrono::NaiveDate::from_ymd_opt(i32::try_from(y).ok()?, u32::try_from(m).ok()?, 1)?;
+        let date = first.checked_add_days(chrono::Days::new(u64::try_from(d - 1).ok()?))?;
+        let days = (date - chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?).num_days();
+        Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
     }
 
     /// `faces.evaluate`: leave-one-out over the library's named faces, to see how well recognition works on *your*
@@ -672,6 +672,9 @@ mod imp {
         if let Some(w) = &s.faces.worker {
             w.allow(target, pace);
         }
+        // the GPU is held back the same way: a light pace leaves it mostly free for the window's own renders
+        let (runs, share) = crate::faces_worker::gpu_pace(pace);
+        lightcraft_gpu::faces::set_pace(runs, share);
         while target > 0 && s.faces.in_flight.len() < target + PREFETCH {
             let Some(id) = s.faces.queue.pop() else { break };
             let Some(job) = prepare(s, id, true) else { continue };
@@ -841,7 +844,7 @@ mod imp {
         const C: &str = "faces.suggest";
         let embedder = current(s, C)?;
         collect(s);
-        let targets = s.targets(p);
+        let targets = s.targets(p)?;
         let model_threshold = embedder.manifest().thresholds.match_cosine;
         let num = |k: &str| p.get(k).and_then(Value::as_f64).filter(|v| v.is_finite()).map(|v| v as f32);
         let threshold = num("threshold").or(model_threshold).unwrap_or(DEFAULT_THRESHOLD);

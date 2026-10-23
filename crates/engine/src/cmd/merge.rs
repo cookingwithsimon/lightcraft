@@ -20,7 +20,7 @@ fn can_merge(s: &Session) -> std::result::Result<(), String> {
 
 fn run(s: &mut Session, id: &str, p: &Value) -> Result<Value> {
     let (kind, finish) = crate::merge::parse(id, p)?;
-    let ids: Vec<PhotoId> = s.targets(p);
+    let ids: Vec<PhotoId> = s.targets(p)?;
     if !bool_or(p, "preview", false) {
         return s.merge_now(kind, finish, &ids);
     }
@@ -45,7 +45,7 @@ fn run(s: &mut Session, id: &str, p: &Value) -> Result<Value> {
 fn run_batch(s: &mut Session, p: &Value) -> Result<Value> {
     const ID: &str = "merge.hdrBatch";
     let (kind, finish) = crate::merge::parse("merge.hdr", p)?;
-    let ids: Vec<PhotoId> = s.targets(p);
+    let ids: Vec<PhotoId> = s.targets(p)?;
     let sets = s.catalog.bracket_sets(&ids);
     if sets.is_empty() {
         return Err(bad(ID, crate::merge::NO_BRACKET_SETS));

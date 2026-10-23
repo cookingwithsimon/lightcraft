@@ -22,7 +22,7 @@ fn check(name: &str, hash: u64, sensor: (usize, usize), developed: (usize, usize
 fn check_against(name: &str, hash: u64, sensor: (usize, usize), developed: Option<(usize, usize)>, reference: &str) {
     let path = corpus().join("raw").join(name);
     let Ok(bytes) = std::fs::read(&path) else {
-        eprintln!("skip: {} absent", path.display());
+        lightcraft_testkit::skip!(Corpus, "{} absent", path.display());
         return;
     };
     let raw = decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -118,7 +118,7 @@ fn canon_m50_craw_crop_is_the_shot_aspect() {
     // which is (12, 12) inside the valid sensor area.
     let path = corpus().join("raw").join("cr3-canon-m50-craw.cr3");
     let Ok(bytes) = std::fs::read(&path) else {
-        eprintln!("skip: {} absent", path.display());
+        lightcraft_testkit::skip!(Corpus, "{} absent", path.display());
         return;
     };
     let raw = decode(&bytes).unwrap();

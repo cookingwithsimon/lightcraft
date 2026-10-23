@@ -21,7 +21,7 @@ impl Catalog {
     }
     /// The stack a photo belongs to.
     pub fn stack_of(&self, photo: PhotoId) -> Option<&Stack> {
-        self.stacks.values().find(|s| s.photos.contains(&photo))
+        self.stack_id_of(photo).and_then(|id| self.stacks.get(&id))
     }
     /// Photo → (stack, position in the stack), for every stacked photo.
     pub fn stack_index(&self) -> HashMap<PhotoId, (StackId, usize)> {
@@ -41,7 +41,7 @@ impl Catalog {
                 return Err(CatalogError::NoPhoto(*p));
             }
         }
-        if self.stacks.values().any(|s| s.id != id && s.photos.iter().any(|p| seen.contains(p))) {
+        if photos.iter().any(|p| self.stack_id_of(*p).is_some_and(|s| s != id)) {
             return Err(CatalogError::Invalid("a photo can be in only one stack".into()));
         }
         Ok(())
@@ -294,15 +294,17 @@ pub fn iso_seconds(s: &str) -> Option<i64> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return None;
     }
-    let (hh, mm, ss) = if s.len() >= 16 { (num(11, 13)?, num(14, 16)?, num(17, 19).unwrap_or(0)) } else { (0, 0, 0) };
-    // days from civil (proleptic Gregorian)
-    let y2 = if m <= 2 { y - 1 } else { y };
-    let era = y2.div_euclid(400);
-    let yoe = y2 - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
+    let (hh, mm, ss) =
+        if s.len() >= 16 { (num(11, 13)?, num(14, 16)?, if s.get(16..17) == Some(":") { num(17, 19).unwrap_or(0) } else { 0 }) } else { (0, 0, 0) };
+    if hh >= 24 || mm >= 60 || ss >= 60 {
+        return None;
+    }
+    // Days since 1970-01-01 (proleptic Gregorian). A day past the month's length rolls over the
+    // way the old Hinnant arithmetic did (e.g. 2026-02-30 → 2026-03-02), which `normalize_iso`
+    // relies on to reject impossible dates.
+    let first = chrono::NaiveDate::from_ymd_opt(i32::try_from(y).ok()?, u32::try_from(m).ok()?, 1)?;
+    let date = first.checked_add_days(chrono::Days::new(u64::try_from(d - 1).ok()?))?;
+    let days = (date - chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?).num_days();
     Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
 }
 

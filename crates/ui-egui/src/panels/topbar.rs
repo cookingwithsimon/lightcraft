@@ -10,9 +10,8 @@ use crate::widgets::{icon_button, register};
 
 /// The bar doubles as the window's title bar: dragging its empty space moves the window and a
 /// double-click zooms or restores it. Registered before the bar's widgets so they win the click.
-fn window_handle(app: &LightcraftApp, ui: &mut egui::Ui, content: Rect, margin_left: f32, margin_right: f32, search_rect: Rect) {
+fn window_handle(app: &LightcraftApp, ui: &mut egui::Ui, bar: Rect, search_rect: Rect) {
     use crate::titlebar::{Gesture, WindowState, command_for};
-    let bar = Rect::from_min_max(pos2(content.left() - margin_left, content.top()), pos2(content.right() + margin_right, content.bottom()));
     register(ui.ctx(), "region:titlebar", bar);
     let handle = egui::Id::new("titlebar-handle");
     let resp = ui.interact(bar, handle, Sense::click_and_drag());
@@ -60,17 +59,23 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin { left, right: 12, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let full = ui.max_rect();
-            // room for the filter icon and the six icons on the right
-            let mut sw = 640.0f32.min(full.width() - 540.0).max(200.0);
+            // The whole bar, its margins included. The search field is centred on this and not on
+            // `full`, which is only what the margins leave: on macOS the left margin holds the
+            // traffic lights' room, and full screen gives that room back. Centring on `full` moved
+            // the field, and changed its width, every time that room changed (issue #2365).
+            let bar = Rect::from_min_max(pos2(full.left() - left as f32, full.top()), pos2(full.right() + 12.0, full.bottom()));
+            // The field stops short of the filter icon and the seven icons on the right; centred,
+            // it is twice the room between the window's centre and them.
+            let mut sw = 640.0f32.min(2.0 * (full.right() - 310.0 - bar.center().x)).max(190.0);
             if !app.native_menu {
                 // leave room for the in-window menus left of the (centred) search field
                 let menus_right = full.left() + 140.0 + crate::menubar::bar_width(ui) + 24.0;
-                sw = sw.min(2.0 * (full.center().x - menus_right)).max(200.0);
+                sw = sw.min(2.0 * (bar.center().x - menus_right)).max(190.0);
             }
-            let search_left = full.center().x - sw / 2.0;
-            let sr = Rect::from_center_size(pos2(full.center().x, full.center().y), vec2(sw, 28.0));
+            let search_left = bar.center().x - sw / 2.0;
+            let sr = Rect::from_center_size(pos2(bar.center().x, full.center().y), vec2(sw, 28.0));
             if app.integrated_titlebar {
-                window_handle(app, ui, full, left as f32, 12.0, sr);
+                window_handle(app, ui, bar, sr);
             }
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -172,11 +177,18 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 )
             });
             let cloud_tip = unsaved.as_deref().unwrap_or("Local library — no cloud account needed");
+            // Import Photos… beside Export, always one click away, with the key it is bound to now
+            let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
+            let import_tip = match crate::shortcuts::shortcut_of(&app.ui.settings.keymap, "file.addPhotos") {
+                Some(sc) => format!("{} ({})", crate::i18n::tr("Import Photos…"), crate::menubar::shortcut_text(sc, mac)),
+                None => crate::i18n::tr("Import Photos…").to_string(),
+            };
             for (id, icon, tip, cmd) in [
                 ("discord", Icon::Chat, "Join the ArtCraft community on Discord", "app.discord"),
                 ("cloud", Icon::Cloud, cloud_tip, ""),
                 ("help", Icon::Help, "Keyboard shortcuts", "app.shortcuts"),
                 ("share", Icon::Share, "Export", "dialog.export"),
+                ("import", Icon::Plus, import_tip.as_str(), "file.addPhotos"),
                 ("bell", Icon::Bell, "Activity", "panel.activity"),
             ] {
                 let r = Rect::from_center_size(pos2(x, full.center().y), vec2(28.0, 28.0));
@@ -198,8 +210,12 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                     ui.painter().text(c, Align2::CENTER_CENTER, "!", t.semibold(9.5), t.canvas);
                     register(ui.ctx(), "indicator:unsaved", r);
                 }
-                if resp.clicked() && !cmd.is_empty() {
-                    let _ = app.run(cmd, json!({}));
+                // a refusal says why (Import while a Lightroom catalog is coming in)
+                if resp.clicked()
+                    && !cmd.is_empty()
+                    && let Err(e) = app.run(cmd, json!({}))
+                {
+                    app.toast_error(ui.ctx(), e);
                 }
                 x -= 40.0;
             }
@@ -214,7 +230,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             if resp.clicked() {
                 let _ = app.run("view.appearance", json!({}));
             }
-            resp.context_menu(|ui| {
+            crate::widgets::context_menu(&resp, |ui| {
                 let settings = ui.button(crate::i18n::tr("Appearance Settings…"));
                 register(ui.ctx(), "menu:appearanceSettings", settings.rect);
                 if settings.clicked() {

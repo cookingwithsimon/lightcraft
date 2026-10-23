@@ -30,7 +30,7 @@ pub fn view_switch(app: &mut LightcraftApp, ui: &mut egui::Ui) {
 /// exported files will carry. One only some of the photos have is marked with an asterisk.
 pub fn names_row(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
-    let selection = app.session.targets(&serde_json::Value::Null);
+    let selection = app.session.selected();
     let export = app.ui.keywording_view == crate::state::KeywordingView::WillExport;
     let names = app.caches.keyword_names(&app.session.catalog, &selection, export);
     if names.is_empty() {
@@ -225,7 +225,7 @@ fn chip_acts(app: &mut LightcraftApp, ui: &egui::Ui, c: &Chip, body: egui::Respo
         body.on_hover_text(format!("{full}\n{n}"))
     };
     let c = c.clone();
-    body.context_menu(|ui| menu(app, ui, &c));
+    crate::widgets::context_menu(&body, |ui| menu(app, ui, &c));
 }
 
 /// When a list is shortened, only this many chips are measured for it: more than the lines it

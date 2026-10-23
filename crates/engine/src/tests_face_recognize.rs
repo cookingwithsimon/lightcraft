@@ -34,7 +34,7 @@ pub(crate) fn setup(d: &std::path::Path, dim: u64) -> (Session, String) {
 /// committed) and says whether it did: the parts of a test that need to find faces run only then.
 pub(crate) fn install_yunet(s: &mut Session) -> bool {
     let Some(file) = std::env::var_os("LC_YUNET_MODEL") else {
-        eprintln!("LC_YUNET_MODEL is not set: skipping the face-finding part");
+        lightcraft_testkit::skip!(Model, "LC_YUNET_MODEL is not set, so the face-finding part is not checked");
         return false;
     };
     let r = s.execute("faces.models.install", &json!({"path": file.to_string_lossy(), "acknowledged": true}));

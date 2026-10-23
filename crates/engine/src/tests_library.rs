@@ -440,6 +440,21 @@ fn scale_100k_library_queries() {
     m("undo", &mut || {
         s.execute("edit.undo", &serde_json::json!({})).unwrap();
     });
+    // a 20k-photo album shown in its own order (capture-date sort, no filter)
+    let big = s.execute("album.create", &serde_json::json!({"name": "Big"})).unwrap()["id"].as_u64().unwrap();
+    let ids: Vec<u64> = (0..n).rev().step_by(5).map(|i| i + 1).collect();
+    m("add 20k to an album", &mut || {
+        s.execute("album.addPhotos", &serde_json::json!({"id": big, "ids": ids})).unwrap();
+    });
+    m("album of 20k (album order)", &mut || {
+        s.execute("library.source", &serde_json::json!({"kind": "album", "id": big})).unwrap();
+        let _ = s.visible_cloned();
+    });
+    s.execute("library.source", &serde_json::json!({"kind": "all"})).unwrap();
+    let half: Vec<u64> = ids.iter().copied().step_by(2).collect();
+    m("remove 10k from the album", &mut || {
+        s.execute("album.removePhotos", &serde_json::json!({"id": big, "ids": half})).unwrap();
+    });
     worst.sort_by(|a, b| b.1.total_cmp(&a.1));
     eprintln!("slowest: {:?}", &worst[..3]);
 }

@@ -77,7 +77,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             ui.label(egui::RichText::new(crate::i18n::tr(none)).color(t.text_dim));
         });
     }
-    let selection = app.session.targets(&serde_json::Value::Null);
+    let selection = app.session.selected();
     let ticks = app.caches.keyword_ticks(&app.session.catalog, &selection);
     for r in &rows {
         row(app, ui, r, &selection, &ticks, filter.trim().is_empty());
@@ -272,7 +272,7 @@ fn row(app: &mut LightcraftApp, ui: &mut egui::Ui, r: &Row, selection: &[PhotoId
     if resp.double_clicked() {
         app.ui.dialog = Some(edit_dialog(app, &r.path));
     }
-    resp.context_menu(|ui| menu(app, ui, &r.path, selection));
+    crate::widgets::context_menu(&resp, |ui| menu(app, ui, &r.path, selection));
 }
 
 /// A row while a keyword or photos are dragged: outlined under the pointer when the drop would
@@ -621,13 +621,13 @@ mod tests {
             "Export Keywords…",
         ];
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
-        for code in ["de", "es", "fr", "pt-br", "ru", "uk", "ja", "zh-hans", "zh-hant", "cs", "pl"] {
+        for code in ["de", "es", "fr", "pt-br", "ru", "uk", "it", "ka", "ja", "zh-hans", "zh-hant", "pl", "cs", "sv", "fi", "id", "vi"] {
             let text = std::fs::read_to_string(dir.join(format!("{code}.json"))).unwrap();
             let catalog: std::collections::HashMap<String, String> = serde_json::from_str(&text).unwrap();
             for label in labels {
                 assert!(catalog.contains_key(label), "{code}: “{label}”");
             }
         }
-        assert_eq!(Locale::ALL.len(), 12, "a language added: list its file above");
+        assert_eq!(Locale::ALL.len(), 18, "a language added: list its file above");
     }
 }

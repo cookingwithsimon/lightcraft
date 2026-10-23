@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn thai_folder_name_has_glyphs_in_every_ui_family() {
         if lightcraft_engine::CRAFT_FONTS.is_empty() {
-            eprintln!("built without CRAFT_FONTS_DIR: no craft-fonts to check");
+            lightcraft_testkit::skip!(Fonts, "built without CRAFT_FONTS_DIR: no craft-fonts to check");
             return;
         }
         let thai = lightcraft_engine::CRAFT_FONTS.iter().find(|f| f.covers("Thai")).expect("font input includes Thai");

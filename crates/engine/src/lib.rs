@@ -29,6 +29,7 @@ pub mod demo;
 pub mod denoise;
 pub mod devices;
 pub mod display;
+pub mod doc_path;
 mod errors;
 pub mod export;
 pub mod face_download;
@@ -38,6 +39,8 @@ mod faces_index;
 #[cfg(not(target_arch = "wasm32"))]
 mod faces_worker;
 pub mod files;
+#[cfg(not(target_arch = "wasm32"))]
+mod focus_scan;
 pub mod fonts;
 pub mod guard;
 pub mod import;
@@ -54,11 +57,16 @@ pub mod media;
 pub mod memory;
 pub mod merge;
 mod model_download;
+pub mod open_path;
 pub mod originals;
 mod pdf;
 pub mod preset_import;
 pub mod preset_luminar;
 pub mod presets;
+pub mod print;
+pub mod print_color;
+pub mod print_pdf;
+pub mod profile_refs;
 pub mod proof;
 pub mod rename;
 pub mod segment;
@@ -178,6 +186,10 @@ pub struct Interaction {
     pub label: String,
     pub photo: PhotoId,
     pub original: Arc<DevelopSettings>,
+    /// Whether an edit during the interaction changed the crop itself. If none did, the crop the
+    /// photo shows was fitted by Constrain Crop, and the final commit starts again from the original
+    /// crop, so Auto Sync carries the edit and not the active photo's fitted crop.
+    pub crop_edited: bool,
 }
 
 /// The most photos an edit may touch for the view to follow it photo by photo; a larger edit is worked out whole.
@@ -232,6 +244,8 @@ pub struct Session {
     /// Set by a command whose change must not rewrite the photo's XMP sidecar even with auto-write on
     /// (a catalog-only edit of data the sidecar writer does not emit); consumed when the command ends.
     pub(crate) skip_auto_write: bool,
+    /// The order of Reload from Disk runs, so an older one finishing late is dropped ([`cmd::reload`]).
+    pub(crate) reload_tickets: cmd::reload::Tickets,
     /// Photos whose automatic XMP sidecar write failed (their folder offline, read-only or full), written again by
     /// [`Session::retry_unsaved_sidecars`] once their file is reachable.
     pub(crate) unsaved_sidecars: std::collections::BTreeSet<PhotoId>,
@@ -248,6 +262,9 @@ pub struct Session {
     /// The loaded recognition model and the face embeddings made with it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) faces: faces_index::FacesState,
+    /// Reading focus points for photos imported before they were read (`photo.readFocusPoints`, `focus.pump`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) focus_scan: focus_scan::FocusScan,
     /// Copied develop settings (partial JSON) for Paste.
     pub clipboard: Option<Value>,
     /// The folder on disk the [`LibrarySource::Folder`] view browses.
@@ -289,8 +306,17 @@ pub struct Session {
     pub xmp: sidecar::XmpPrefs,
     /// Parameters of the last export (`app.export` params, minus targets), persisted in prefs.json.
     pub last_export: Option<serde_json::Value>,
+    /// The options of the last Photo Merge started, per command (`merge.hdr`, `merge.panorama`,
+    /// `merge.hdrPanorama`): the merge dialog opens with them and "… with Last Settings" uses
+    /// them. Persisted in prefs.json.
+    pub last_merge: std::collections::BTreeMap<String, serde_json::Value>,
     /// The user's export presets (built-ins: [`export::builtin_presets`]), persisted in prefs.json.
     pub export_presets: Vec<export::ExportPreset>,
+    /// The Print module's current layout, image settings, page, guides and job (`print.*`). Lives
+    /// with the session, so the app, CLI, control channel and MCP all see the same print.
+    pub print: print::template::PrintSettings,
+    /// Saved print templates (`print.template.*`), persisted in prefs.json.
+    pub print_templates: Vec<print::template::PrintTemplate>,
     /// Metadata presets (`metadata.*`), persisted in prefs.json.
     pub metadata_presets: Vec<cmd::metadata::MetadataPreset>,
     /// Saved filter-bar settings (`filter.*`), persisted in prefs.json.
@@ -414,6 +440,7 @@ impl Session {
             pending_sidecar_repairs: Vec::new(),
             interaction: None,
             skip_auto_write: false,
+            reload_tickets: Default::default(),
             unsaved_sidecars: Default::default(),
             denoise: Default::default(),
             face_models_dir: None,
@@ -422,6 +449,8 @@ impl Session {
             face_catalog: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             faces: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            focus_scan: Default::default(),
             clipboard: None,
             meta_clipboard: None,
             browse: None,
@@ -443,7 +472,10 @@ impl Session {
             library_identity: Arc::new(()),
             xmp: sidecar::XmpPrefs::default(),
             last_export: None,
+            last_merge: Default::default(),
             export_presets: Vec::new(),
+            print: Default::default(),
+            print_templates: Vec::new(),
             metadata_presets: Vec::new(),
             filter_presets: Vec::new(),
             curve_presets: Vec::new(),
@@ -500,7 +532,11 @@ impl Session {
         }
         let empty = Value::Object(Default::default());
         let params = if params.is_null() { &empty } else { params };
-        self.run_command(id, spec.journal.then_some(params), |s| (spec.run)(s, params))
+        self.run_command(id, spec.journal.then_some(params), |s| (spec.run)(s, params)).map_err(|e| match e {
+            // a shared parameter check ([`Session::targets`]) names the command it ran for
+            EngineError::BadParams { cmd, msg } if cmd.is_empty() => EngineError::BadParams { cmd: id.to_string(), msg },
+            e => e,
+        })
     }
 
     /// Run `f` as command `id` with what [`Session::execute`] does around every command: the
@@ -852,22 +888,58 @@ impl Session {
     /// undo step; otherwise it is committed with a history entry.
     pub fn set_develop(&mut self, id: PhotoId, settings: DevelopSettings, label: &str) -> Result<()> {
         let now = (self.clock)();
-        let settings = Arc::new(settings);
-        if let Some(i) = &self.interaction
+        // Auto Sync carries the edit as asked; each photo then fits its own crop (review of #1990)
+        let requested = settings;
+        let settings = Arc::new(self.fit_constrained_crop(id, requested.clone()));
+        let crop_edited = self.develop_of(id).is_some_and(|d| d.crop.geometry != requested.crop.geometry);
+        if let Some(i) = &mut self.interaction
             && i.photo == id
         {
+            i.crop_edited |= crop_edited;
             return self.apply_silent(Op::SetDevelop { id, settings, label: label.into(), edited: Some(now) });
         }
         let mut ops = vec![self.develop_op(id, (*settings).clone(), label).ok_or(lightcraft_catalog::CatalogError::NoPhoto(id))?];
-        ops.extend(self.auto_sync_ops(id, &settings, label));
+        ops.extend(self.auto_sync_ops(id, &requested, label));
         let op = if ops.len() == 1 { ops.remove(0) } else { Op::Batch { ops } };
         self.commit(label, op)
     }
 
-    /// With Auto Sync on, the ops that carry an edit of the active photo `id` (to `new`) over to the
-    /// other selected photos: only the settings that changed; never spot removal or red eye (they
-    /// belong to one photo's pixels), nor the rendering process (Sync doesn't carry it either), nor
-    /// history / snapshot restores.
+    /// "Constrain Crop" keeps the stored crop inside the warped photo, as Lightroom does (issue
+    /// #1927): turning it on, or an edit that changes the warp (Geometry, Upright, lens corrections,
+    /// their sections' eyes) while it is on, shrinks the crop about its centre until no blank corner
+    /// is left, so the Crop tool shows what the render keeps. An edit of the crop itself is left as
+    /// drawn (the render still constrains it).
+    fn fit_constrained_crop(&self, id: PhotoId, mut d: DevelopSettings) -> DevelopSettings {
+        if !d.geometry.constrain_crop {
+            return d;
+        }
+        let Some(photo) = self.catalog.photo(id) else { return d };
+        let before = &photo.develop;
+        let turned_on = !before.geometry.constrain_crop;
+        let warp_changed = before.geometry != d.geometry
+            || before.optics != d.optics
+            || before.orientation != d.orientation
+            || ["geometry", "optics"].iter().any(|s| before.section_enabled(s) != d.section_enabled(s));
+        let crop_edited = before.crop.geometry != d.crop.geometry;
+        if !(turned_on || (warp_changed && !crop_edited)) {
+            return d;
+        }
+        let frame = lightcraft_pipeline::geometry::Frame::with_lens(
+            photo.width.max(1) as usize,
+            photo.height.max(1) as usize,
+            &d,
+            true,
+            photo.embedded_lens.as_ref(),
+        );
+        d.crop.geometry.rect = frame.crop.rect;
+        d
+    }
+
+    /// With Auto Sync on, the ops that carry an edit of the active photo `id` (to `new`, as asked,
+    /// before its crop is fitted) over to the other selected photos: only the settings that changed;
+    /// never spot removal or red eye (they belong to one photo's pixels), nor the rendering process
+    /// (Sync doesn't carry it either), nor history / snapshot restores. Constrain Crop then fits each
+    /// photo's own crop: the active photo's fitted crop is never copied over another's.
     fn auto_sync_ops(&self, id: PhotoId, new: &DevelopSettings, label: &str) -> Vec<Op> {
         if !self.auto_sync
             || self.active() != Some(id)
@@ -878,7 +950,16 @@ impl Session {
             return Vec::new();
         }
         let Some(old) = self.develop_of(id) else { return Vec::new() };
-        let Some(mut delta) = json_delta(&old.to_json(), &new.to_json()) else { return Vec::new() };
+        let mut old_json = old.to_json();
+        let mut new_json = new.to_json();
+        // False is omitted from stored profile JSON. Keep it explicit for this comparison so
+        // switching camera local tone mapping off is a change without copying untouched values.
+        old_json["profile"]["camera_local_tone"] = Value::Bool(old.profile.camera_local_tone);
+        new_json["profile"]["camera_local_tone"] = Value::Bool(new.profile.camera_local_tone);
+        // Compare actual HDR leaves even when persisted defaults omit the whole HDR object.
+        old_json["hdr"] = serde_json::json!(old.hdr);
+        new_json["hdr"] = serde_json::json!(new.hdr);
+        let Some(mut delta) = json_delta(&old_json, &new_json) else { return Vec::new() };
         if let Some(o) = delta.as_object_mut() {
             for k in ["spots", "red_eye", "version", "process"] {
                 o.remove(k);
@@ -893,7 +974,7 @@ impl Session {
             .filter(|x| **x != id)
             .filter_map(|x| self.develop_of(*x).map(|d| (*x, d)))
             .filter_map(|(x, d)| {
-                let synced = lightcraft_develop::apply_partial(&d, &delta, 1.0);
+                let synced = self.fit_constrained_crop(x, lightcraft_develop::apply_partial(&d, &delta, 1.0));
                 (synced != *d).then(|| self.develop_op(x, synced, label)).flatten()
             })
             .collect()
@@ -915,7 +996,7 @@ impl Session {
         }
         let id = self.active().ok_or_else(|| EngineError::Other("no active photo".into()))?;
         let original = self.develop_of(id).unwrap_or_default();
-        self.interaction = Some(Interaction { label: label.into(), photo: id, original });
+        self.interaction = Some(Interaction { label: label.into(), photo: id, original, crop_edited: false });
         Ok(())
     }
 
@@ -926,9 +1007,15 @@ impl Session {
         if *cur == *i.original {
             return Ok(());
         }
-        // Restore the original silently, then commit the final value as one step.
+        // Restore the original silently, then commit the final value as one step. A crop nobody
+        // edited goes back to the original's: Constrain Crop fits it again for the final warp, and
+        // Auto Sync carries the edit, not the active photo's fitted crop (review of #1990).
         self.apply_silent(Op::SetDevelop { id: i.photo, settings: i.original.clone(), label: i.label.clone(), edited: None })?;
-        self.set_develop(i.photo, (*cur).clone(), &i.label)
+        let mut last = (*cur).clone();
+        if !i.crop_edited {
+            last.crop.geometry = i.original.crop.geometry;
+        }
+        self.set_develop(i.photo, last, &i.label)
     }
 
     pub fn cancel_interaction(&mut self) -> Result<()> {
@@ -1027,8 +1114,12 @@ impl Session {
                 && !al.is_smart()
                 && self.filter == Filter::default()
             {
-                let order = al.photos.clone();
-                visible.sort_by_key(|id| order.iter().position(|x| x == id).unwrap_or(usize::MAX));
+                // each photo's place looked up, not searched for (a big album sorted in O(n log n))
+                let mut place: std::collections::HashMap<PhotoId, usize> = std::collections::HashMap::with_capacity(al.photos.len());
+                for (i, id) in al.photos.iter().enumerate() {
+                    place.entry(*id).or_insert(i);
+                }
+                visible.sort_by_key(|id| place.get(id).copied().unwrap_or(usize::MAX));
                 if !self.sort.ascending {
                     visible.reverse();
                 }
@@ -1167,14 +1258,24 @@ impl Session {
         (self.visible_gen, self.visible.clone())
     }
 
-    /// Targets of photo commands: explicit `ids`/`id` param, else the selection.
-    pub fn targets(&self, p: &Value) -> Vec<PhotoId> {
-        if let Some(a) = p.get("ids").and_then(Value::as_array) {
-            return a.iter().filter_map(Value::as_u64).map(PhotoId).collect();
+    /// Targets of photo commands: the explicit `ids` (photo ids) or `id` (a photo id) param, else [`Self::selected`].
+    /// An `ids` or `id` that is there but isn't photo ids is an error, never the selection or part of the list
+    /// (issue #1506): a mistyped target mustn't turn a command meant for one photo into one for every selected photo.
+    pub fn targets(&self, p: &Value) -> Result<Vec<PhotoId>> {
+        let invalid = |what: &str| EngineError::BadParams { cmd: String::new(), msg: format!("`{what}` must be photo ids (whole numbers)") };
+        match p.get("ids") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(a)) => return a.iter().map(|v| v.as_u64().map(PhotoId).ok_or_else(|| invalid("ids"))).collect(),
+            Some(_) => return Err(invalid("ids")),
         }
-        if let Some(id) = p.get("id").and_then(Value::as_u64) {
-            return vec![PhotoId(id)];
+        match p.get("id") {
+            None | Some(Value::Null) => Ok(self.selected()),
+            Some(v) => v.as_u64().map(|id| vec![PhotoId(id)]).ok_or_else(|| invalid("id")),
         }
+    }
+
+    /// The photos commands act on when a call names none: the selection, else the active photo.
+    pub fn selected(&self) -> Vec<PhotoId> {
         if self.selection.ids.is_empty() { self.selection.active.into_iter().collect() } else { self.selection.ids.clone() }
     }
 }
@@ -1206,7 +1307,11 @@ mod tests_albums_local;
 #[cfg(test)]
 mod tests_color;
 #[cfg(test)]
+mod tests_constrain_crop;
+#[cfg(test)]
 mod tests_crop_angle;
+#[cfg(test)]
+mod tests_crop_aspect;
 #[cfg(test)]
 mod tests_denoise;
 #[cfg(test)]
@@ -1221,6 +1326,8 @@ mod tests_face_recognize;
 mod tests_face_tiles;
 #[cfg(test)]
 mod tests_filesystem_history;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests_focus_scan;
 #[cfg(test)]
 mod tests_folders;
 #[cfg(test)]
@@ -1229,6 +1336,8 @@ mod tests_forget_local;
 mod tests_history_cursor;
 #[cfg(test)]
 mod tests_hold_view;
+#[cfg(test)]
+mod tests_ids_params;
 #[cfg(test)]
 mod tests_import;
 #[cfg(test)]
@@ -1246,6 +1355,8 @@ mod tests_mask_effects;
 #[cfg(test)]
 mod tests_merge;
 #[cfg(test)]
+mod tests_move_to_share;
+#[cfg(test)]
 mod tests_organize;
 #[cfg(test)]
 mod tests_persist;
@@ -1253,6 +1364,8 @@ mod tests_persist;
 mod tests_prefs;
 #[cfg(test)]
 mod tests_presets_scale;
+#[cfg(test)]
+mod tests_print;
 #[cfg(test)]
 mod tests_process;
 #[cfg(test)]

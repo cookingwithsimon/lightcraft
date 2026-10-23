@@ -1,6 +1,158 @@
 # What's new in LightCraft
 
+## 2026-10-21
+
+### Sharper resampling in HDR and panorama merges
+- Merged photos (HDR and panorama) are resampled with a sharper filter (Lanczos-3 instead of bilinear). Moving a
+  photo by half a pixel used to lose a third of its finest detail; now it keeps most of it, without halos around
+  hard edges such as clipped highlights.
+
+### Scrolling past editing sliders
+- Leaving a selected slider disarms its vertical mouse-wheel adjustment (issue #1355), even when the pointer leaves
+  and comes back between two screen updates. Scrolling back over it now scrolls the panel instead of unexpectedly
+  changing the photo. Click or drag the slider again to adjust it with the vertical wheel; keyboard arrow
+  adjustments and an ongoing drag still work. A slider reached with Tab takes the arrow keys but not the wheel:
+  click it to scroll-adjust it. Sideways scrolling still adjusts the slider under the pointer without selecting it
+  first.
+
+### A pinch no longer re-renders the photo at every zoom step
+- Pinching the loupe now keeps the size the fit view is rendered at until the gesture is quiet, as it already did for
+  the render sizes and windows. Before, each frame of a pinch asked for a new full-frame render at a new size.
+
+### Fujifilm lens corrections that match the camera
+- X-T4 raws now read the lens's own distortion and vignetting tables the way the camera does. Many photos from zoom
+  lenses got no distortion correction at all (more than half of those checked from the XF16-55 and XF70-300), and
+  corners came out up to 6.5 % brighter than in the camera's JPEG. The corrected photo now lines up with the camera's
+  framing. Other recent Fujifilm bodies whose tables have nine knots are read the same way, but only the X-T4 was
+  measured. Thumbnails are redrawn when the library next shows them.
+
+### Reference view reliability
+- Escape now leaves Reference for Detail without changing the active photo or its edits; the next
+  Escape returns to the grid. A dialog, tool or Lights Out still handles Escape first.
+- Opening or creating a different library clears the pinned reference. Photo IDs belong to one
+  catalog; a pin no longer silently becomes another library's photo with the same numeric ID.
+- Missing or Recently Deleted photos cannot be pinned. Deleting the pinned reference stops drawing
+  it; re-entering Reference chooses a live photo, and restoring the deleted photo makes it pinnable again.
+  In Recently Deleted, Set as Reference Photo is greyed out, and a refusal says to restore the photo.
+- Switching library from Reference view goes to the grid instead of an empty Reference canvas. A refused
+  or failed switch keeps both the reference and the Compare pair.
+- `photo.setReference` refuses an `id` that is not a photo id (a string, a negative or fractional
+  number) instead of pinning the active photo; only an absent or null `id` means the active photo.
+
+## 2026-10-20
+
+### Smart albums check File Path rules faster
+- A smart album rule on File Path (contains, doesn't contain, is, isn't, starts with, ends with, is empty, isn't
+  empty) no longer builds new text for every photo. On a synthetic library of 312,000 photos, a File Path "contains"
+  or "doesn't contain" rule took about 17 ms per pass instead of about 62 ms, around 3.5 times faster, with the same
+  photos matched; about 6 ms of that is only reading the paths. Paths and rule text with letters beyond A–Z are
+  compared as before.
+
+## 2026-10-19
+
+### AI Denoise on DirectX 12 with NVIDIA GTX 10-series cards
+- AI Denoise on the GPU under DirectX 12 (the Windows default) gives the same result as on the CPU again on an NVIDIA
+  GeForce GTX 1070. The driver ran the denoise network's output stores wrong, so every second pixel's colour
+  channels came out shifted and the denoised photo was wrong without any error. Vulkan was not affected.
+
+### The Before label stays in view when zoomed in
+- Zoomed in, the "Before" label (\ key or the Before view) now sits at the canvas' corner instead of leaving the
+  screen with the photo's corner (issue #2267).
+
+### Synchronize Folder on a folder that is up to date
+- When the scan finds nothing to import, relink, remove or read, the Synchronize Folder dialog says the library is up
+  to date with the folder and has one Close button. It used to show four greyed choices, two of them still ticked,
+  and a Synchronize button that started a job with nothing to do. Files it skipped (already in the library elsewhere,
+  or unreadable) are still listed.
+
+
+### Hidden Local locations come back one at a time
+- With several locations removed from Local, "Show N hidden locations" now lists them, so each comes back on its own
+  (Restore All is there too). The row used to bring every hidden location back at once (issue #2114).
+
+## 2026-10-18
+
+### Thumbnails of Lightroom HDR and panorama merges in a second
+- Grid and filmstrip thumbnails of DNGs that Lightroom merged (HDR, Panorama, HDR Panorama) now develop from the
+  small copies of the raw image Lightroom keeps inside the file (256 to 2048 px), not from the whole merge. A 23836 ×
+  7078 drone panorama's 512 px thumbnail took 38 s and now takes about a second, with the same look; your edits still
+  apply. Loupe previews larger than the biggest copy, 1:1 views and exports still read the full image.
+
+### Fewer false "not imported" warnings for Lightroom raws
+- Importing raws with Lightroom XMP sidecars no longer lists settings Lightroom writes only for itself as adjustments
+  that weren't imported: `CompatibleVersion`, the camera and lens profile checksums, the lens profile's name, file and
+  setup, the crop's "constrain to image" option, and the lens profile's strength when it is at its default of 100 %.
+  A raw sidecar used to name all of them for every photo. Settings LightCraft really doesn't apply, such as `Look`,
+  are still reported.
+
+
+### Fill Location from GPS: no more neighbouring town in City
+- The offline place names list towns of 15,000 people or more, so a photo taken in a smaller one got the nearest larger
+  town in City, sometimes another municipality (issue #2242). The Fill Location tooltip and the command help now say so,
+  and `metadata.reverseGeocode` takes `maxDistance` (metres): past it, City stays empty (State and Country still fill)
+  and the reply names the town it found as `nearestCity`.
+
+### A preset that couldn't be saved is no longer lost silently
+- When presets.json can't be written (a full disk, or the browser's storage quota), the new or changed preset now
+  counts as unsaved, like other changes: the top bar warns, saving is retried, and quitting asks first (issue #2266).
+  Before, the failure was only logged, and the preset could be lost without any warning.
+
+### Portrait crop ratios stay portrait
+- A crop ratio no longer flips to the photo's orientation (issue #2253): after X turns the crop portrait, picking
+  another ratio (4 × 5, 2 × 3…) keeps it portrait, as in Lightroom, and a Custom ratio taller than wide gives a
+  portrait crop.
+
+## 2026-10-16
+
+### Synchronize Folder shows that it is listing the folder
+- A folder with tens of thousands of photos, above all on a network share, can take minutes to list before
+  Synchronize Folder checks a single photo. Its row in the activity stack used to sit at "0 of 64085" with an empty
+  bar all that time, as if it had stopped. It now says how many folders and files it has listed so far, with a bar
+  that moves on its own, and then counts the photos it checks. The dialog says the same.
+- ✕ on the row stops the listing too, not only the checks after it.
+
+### The photo grid keeps up with imports into a large library
+- While photos are imported into a large library, the grid takes in each batch as it arrives instead of reading
+  every photo of the view again: at about 180,000 photos a batch cost the window a tenth of a second, over and over
+  for as long as the import ran. Changing one photo's capture time or crop is quicker too.
+
+## 2026-10-15
+
+### Photo Merge takes each photo once
+- A merge that names the same photo more than once (through `ids` on the control channel, MCP or the CLI) now merges
+  it once (issue #1947). Naming one photo three times no longer "merges" it with itself, and a long repeated list no
+  longer decodes the photo again for every entry.
+
+### Constrain Crop tightens the crop you see
+- Geometry ▸ Constrain Crop now changes the crop itself, as in Lightroom (issue #1927). Ticking it, or moving a
+  Geometry slider, Upright or a lens correction while it is ticked, shrinks the crop about its centre until the blank
+  corners left by the correction are gone, and the Crop tool shows the tighter crop. Before, it only applied when the
+  photo was shown outside the Crop tool, so in the Crop panel, where the checkbox is, nothing seemed to change. A crop
+  you draw by hand is kept as drawn, and unticking keeps the tighter crop.
+
+### Web: no backup that misses unsaved changes
+- In the browser version, File ▸ Back Up Library… no longer reports success while a save is failing (storage full or
+  cleared): the backup copies the stored library, so it left out the changes that couldn't be saved (issue #1508). It
+  now refuses to start and says how many changes are unsaved and why. LightCraft retries the save with every change;
+  back up once nothing is left unsaved.
+
+### Web: an unreadable library is not opened
+- In the browser version, a library file that exists but can't be read at start-up is no longer taken for a missing
+  one (issue #1507). LightCraft used to open the library without it, showing an incomplete catalog that the next save
+  would write over the stored copy. It now leaves the library unopened, saves nothing and says which file couldn't be
+  read; reload the page to try again.
+
 ## 2026-10-14
+
+### Model downloads time out on a name that doesn't resolve
+- Model downloads (AI denoise, faces, SAM) give up on a server name that doesn't resolve within the connect timeout,
+  and Cancel stops a download that is still looking the name up (issue #1532). The lookup used to block with no time
+  limit, and each of a server's addresses then got the whole connect timeout of its own.
+
+### Sony A7CR distortion correction
+
+- Full-frame 3:2 Bayer A7CR raws with distortion Auto or forced Auto now use their embedded distortion table. The corrected render is closer to the camera JPEG geometry. Off files keep their original geometry. APS-C, aspect crops and lossless M/S remain excluded.
+- The warp also supplies the geometry needed by the lens-aligned camera-look fit in PR #1586. The pairing code is a separate change. Details and numeric validation are in `docs/sony-lens-corrections.md`.
 
 ### Lightroom radial masks on the right side
 - Radial masks brought over from Lightroom Classic (catalog import, XMP sidecars, edits inside DNGs and presets) now
@@ -19,6 +171,16 @@
 - Showing a Local folder now makes its first photo the active one, as albums and the other sources do (issue
   #1447), or keeps the photo you had when the folder holds it. Before, the photo from the previous view stayed active:
   Photo Grid marked nothing, and Detail, the histogram and the photo info showed a photo that isn't in the folder.
+
+### Nikon Z 6II, Z 8 and D5300 colour profiles
+- Raws from the Nikon Z 6II, Z 8 and D5300 now start from a colour profile built from a few hundred photos from each camera, the same way the
+  Sony and Fujifilm profiles were made, instead of fitting each photo's colour on its own. Colours that one photo
+  shows only a little of come out closer to the camera's JPEG.
+
+### Closer camera colour for lens-corrected raws
+- Raws from cameras that correct their own JPEG for lens distortion (Panasonic and Fujifilm with that setting on, the
+  Sony A7R IVA) now start from colours closer to the camera's. The starting look was being fitted against a JPEG that
+  didn't line up with the raw near the edges. Photos you already imported pick this up when their previews are rebuilt.
 
 ### HDR merges of moving lights, and many brackets at once
 - A star, the moon or a light that moves between the photos of a bracket (a night bracket on a tripod) no longer
@@ -117,10 +279,64 @@
   #1236). The D7000, D5100, D800, D800E, Df, D4, D3, D3S, D700, D300, D300S, D600, D610, D810, D4S, D5600,
   Coolpix A, D3000, D40X, D60, D80, D2Xs, D200, D3200, D3100, D5000, D40, D50, D70, D70s and Nikon 1 V1 now show
   the area the camera itself frames, a few pixels smaller than before.
+### An empty library leads to Import
+- A library with no photos now opens on the Photo Grid with the sidebar (Square Grid stays as it is), instead of a
+  Detail view that pointed at an empty grid. The grid and Detail view offer Import Photos… and, in the desktop app,
+  Import Lightroom Catalog… as buttons, and say that photos (and, in the desktop app, folders) can be dropped into
+  the window. The shortcut they show is the one Import Photos… has now.
+- The top bar has an Import button, beside Export, in every library.
+
+### Reliability
+
+### One kind of button
+- Dialogs' buttons and About's Discord link are drawn by one button component: primary (filled with the accent),
+  secondary, danger (filled red) and ghost, in three sizes, with an icon or without, and an icon alone (named for
+  screen readers). Each darkens a little when hovered and more when pressed, shows a ring where the keyboard is, and
+  its text reads at 4.5:1 or more on its fill in every theme. Dialog buttons are 30 points tall, like the welcome's.
+
+### A dialog's confirm button says it's the next step
+- In dialogs, the confirm button is on the right with Cancel to its left, and filled with the accent when it makes or
+  brings in something (Import N Photos, Merge, Save, Create, Download…). Delete and Remove stay plain, so a destructive
+  choice is never the eye-catching default.
+### Straight brush strokes with ⇧-click
+- With the brush, click once, then ⇧-click somewhere else: the brush paints a straight line between the two, and
+  further ⇧-clicks carry on from the last point, as in Lightroom. Change the brush size, feather or flow before the
+  ⇧-click and the line tapers from the old values to the new ones. The whole line is one undo step.
+  `mask.brushStroke {connect: true}` does the same for agents.
+
+### Local folders you browse are kept
+- Browsing a folder under Local now records it as browsed, so the photos in folders you use aren't forgotten after
+  the number of days set in Settings → Performance. Only the `library.browse` command recorded it before, so a
+  folder browsed every day from the sidebar was forgotten anyway and read again from scratch on the next visit,
+  which is slow on a network share.
 
 ### Hard-edged Heal and Clone spots
 - A spot with Feather at 0 no longer draws black pixels exactly on its radius. This also fixes spots at 0% Opacity
   changing pixels along their edge. The hard edge now leaves pixels on the radius unchanged.
+
+### Search finds people
+- Typing a person's name in Search Photos finds the photos with that named face (issue #1449).
+- Quotes keep several words together: `person:"Jane Doe"` finds exactly that person, `"jane doe"` those words side
+  by side, and `keyword:"new york"` a keyword of two words.
+
+### Where the camera focused
+- **View ▸ Show Focus Point** (⌥F) draws the autofocus frame the camera recorded over the photo, in Detail, Compare
+  and Survey, following rotation and crops; the Info panel says how it focused (`AF-C · Wide · Animal Eye Tracking`).
+  Lightroom has no such view.
+- **Z zooms to it**: Toggle Zoom centres on the focus point, so checking that the subject is sharp is one key
+  (View ▸ Zoom to Focus Point turns this off). Photos without a point zoom as before.
+- Sony α1 (ILCE-1) and A7S III (ILCE-7SM3) raws for now; manual-focus shots and Wide shots that only report the frame
+  centre show nothing. More cameras will follow. Details: [focus-points.md](focus-points.md).
+- **Photos already in your library get theirs in the background**: LightCraft reads just the few kilobytes of each
+  file that hold the focus point (about 100 photos a second from a spinning disk), with a *Reading focus points* row
+  in the activity stack you can stop. Photo ▸ Read Focus Points runs it by hand.
+
+### Cleaner HDR merges
+- Bright windows in an HDR made with Photo ▸ Photo Merge ▸ HDR no longer take a magenta tinge from the brighter
+  photos along the areas they clipped: right next to a clipped area, a photo's colour isn't used. It showed most when
+  the highlights were darkened or saturated.
+- The same photos give the same HDR whatever order they are selected in; before, a different order could change a
+  few pixels.
 
 ### HDR merges keep the white balance
 - An HDR merged from raws that LightCraft colours from the camera's JPEG (CR2, NEF, ARW…) now opens at the same
@@ -212,6 +428,23 @@
   else (issue #1504): trimming or clearing the cache can't delete files outside it, and thumbnails are never read
   from or written through such a link.
 
+### Synchronize Folder asks a network share less
+- A Synchronize Folder scan no longer asks the disk about every photo of the library in the folder (is its file
+  there, has it a sidecar): it has just listed the folder, and reads the answers off the listing. On a network share
+  each of those questions is a round trip. Measured on a hard disk over SMB, for folders of 1,600 to 2,400 photos
+  that had not changed: 4.6 to 7.1 s of questions after the listing (about 3 ms a photo), now under 0.05 s. The
+  listing itself took 4 to 5 s and is as it was.
+- The disk is still asked wherever a listing can't be sure what a file system would say: about a name that is
+  there in another case, a link, a name Windows reads another way (`aux.jpg`, a `~`, a `:`, a dot or a space at the
+  end), a folder the scan did not walk to its end, and, in a folder that holds any name with a character outside
+  ASCII (an umlaut, a curly apostrophe, a dash), about every name the folder does not list. Names it does list are
+  answered there too. In such a folder the scan saves less, and its checks now start after the listing where they
+  ran beside it.
+- A photo the folder lists is there for the scan, also where its file could not be opened by its path (a folder
+  that may be listed but not searched, a path longer than the system takes): such photos used to be listed as
+  missing. And a share that drops after the scan has listed a folder no longer turns that folder's photos into
+  missing ones.
+
 ### Large libraries: Synchronize Folder, import and sidecars start sooner
 - Opening Synchronize Folder, an import review or an import no longer makes a table of every photo in the library
   before it looks at the first file. In a library of 3.5 million photos that held the window for about 6 s before
@@ -281,6 +514,12 @@
   with NVIDIA), LightCraft still stops, because its window can't keep drawing on the lost device, but it now says
   "LightCraft stopped unexpectedly" and why, instead of "could not open its window", and the next start renders
   on the CPU and explains how to turn the GPU back on.
+
+### Resetting a slider
+- Resting the pointer on a slider's name or its thumb now says that a double-click resets it ("Exposure — double-click
+  to reset it"), in every language (issue #1436).
+- A double-click on the thumb is a single step in History and Undo. Its first click no longer nudges the value to
+  where the pointer landed, and a single click on the thumb leaves the value alone.
 
 ### Slider drags on large raws
 - Dragging a slider no longer re-renders the edited photo's filmstrip thumbnail on every frame; it follows once you

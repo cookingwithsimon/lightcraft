@@ -5,6 +5,7 @@
 
 mod assets;
 mod bench;
+mod ci_report;
 mod ico;
 mod layers;
 mod parity;
@@ -33,7 +34,11 @@ commands:
   web [--serve [port]] [--dev]
                   build the browser app (apps/lightcraft-web) into <target>/web-site/;
                   --serve serves it on http://127.0.0.1:<port> (default 8080)
-  ci              fmt --check, clippy -D warnings, heif, test, parity refs, layers, assets, wasm (stops at first failure)
+  ci [--hardware] [--summary-md]
+                  fmt --check, clippy -D warnings, heif, test, GPU probe, parity refs, layers, assets, wasm
+                  (stops at first failure); writes target/ci/report.json (machine, GPU adapters, data,
+                  steps, skipped tests) and target/ci/summary.md; --hardware also runs the GPU tests on
+                  every backend with a hardware adapter; --summary-md prints the Markdown summary
   corpus [--download]
                   show where test corpora live; --download fetches PngSuite and CC0 raw samples (raw.pixls.us) into corpus/ and checks their sha256
   stats [--exact] count tests and lines per crate (--exact: ask the test harness via `-- --list`)
@@ -56,7 +61,7 @@ fn main() -> ExitCode {
         Some("parity") => parity::run(&root(), rest.contains(&"--write")),
         Some("wasm") => cmd_wasm(),
         Some("web") => web::run(&rest),
-        Some("ci") => cmd_ci(),
+        Some("ci") => cmd_ci(&rest),
         Some("corpus") => cmd_corpus(rest.contains(&"--download")),
         Some("stats") => stats::run(&root(), rest.contains(&"--exact")),
         Some("raw-frame") => cmd_raw_frame(&rest),
@@ -260,9 +265,38 @@ fn cmd_wasm() -> Result<(), String> {
     if failed == 0 { Ok(()) } else { Err(format!("{failed} crate(s) failed the wasm check")) }
 }
 
-fn cmd_ci() -> Result<(), String> {
-    type Step = (&'static str, Box<dyn Fn() -> Result<(), String>>);
-    let steps: Vec<Step> = vec![
+fn cmd_ci(args: &[&str]) -> Result<(), String> {
+    let hardware = args.contains(&"--hardware");
+    let print_md = args.contains(&"--summary-md");
+    if let Some(other) = args.iter().find(|a| !matches!(**a, "--hardware" | "--summary-md")) {
+        return Err(format!("ci: unknown option `{other}`\n\n{USAGE}"));
+    }
+    let root = root();
+    let report_dir = ci_report::prepare(&root)?;
+    let started = std::time::Instant::now();
+    let started_unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    // test runs append the skips their tests record (`lightcraft_testkit::skip!`) to target/ci/skips-<step>.jsonl
+    let test = |cargo_args: &[&str], step: &str| {
+        let mut c = cargo();
+        c.args(cargo_args).env(ci_report::SKIP_LOG_ENV, ci_report::skip_log(&root, step));
+        run(c, &format!("cargo {}", cargo_args.join(" ")))
+    };
+    let gpu = std::cell::RefCell::new(serde_json::Value::Null);
+    let hardware_runs = std::cell::RefCell::new(Vec::new());
+    // What this machine offers the GPU tests, once, after the workspace tests (whose build the
+    // probe reuses). Never fails the run: the report says what went wrong.
+    let probe = || {
+        if gpu.borrow().is_null() {
+            eprintln!("\n=== ci: GPU probe ===");
+            let t = std::time::Instant::now();
+            let mut found = ci_report::gpu(probe_gpu, hardware);
+            found["seconds"] = serde_json::json!(t.elapsed().as_secs_f64());
+            *gpu.borrow_mut() = found;
+        }
+    };
+
+    type Step<'a> = (&'static str, Box<dyn Fn() -> Result<(), String> + 'a>);
+    let mut steps: Vec<Step> = vec![
         (
             "fmt",
             Box::new(|| {
@@ -286,46 +320,144 @@ fn cmd_ci() -> Result<(), String> {
                 let mut c = cargo();
                 c.args(["clippy", "-p", "lightcraft-codecs", "--features", "heif", "--all-targets", "--", "-D", "warnings"]);
                 run(c, "cargo clippy -p lightcraft-codecs --features heif --all-targets -- -D warnings")?;
-                let mut c = cargo();
-                c.args(["test", "-p", "lightcraft-codecs", "-p", "lightcraft-heif", "--features", "lightcraft-codecs/heif"]);
-                run(c, "cargo test -p lightcraft-codecs -p lightcraft-heif --features lightcraft-codecs/heif")?;
+                test(&["test", "-p", "lightcraft-codecs", "-p", "lightcraft-heif", "--features", "lightcraft-codecs/heif"], "heif")?;
                 // the engine's HEIC import test, with the decoder (the workspace run checks the error)
-                let mut c = cargo();
-                c.args(["test", "-p", "lightcraft-engine", "--lib", "--features", "lightcraft-codecs/heif", "heic"]);
-                run(c, "cargo test -p lightcraft-engine --lib --features lightcraft-codecs/heif heic")
+                test(&["test", "-p", "lightcraft-engine", "--lib", "--features", "lightcraft-codecs/heif", "heic"], "heif")
             }),
         ),
-        (
-            "test",
-            Box::new(|| {
-                let mut c = cargo();
-                c.args(["test", "--workspace"]);
-                run(c, "cargo test --workspace")
-            }),
-        ),
-        ("parity", Box::new(|| parity::run(&root(), false))),
-        ("layers", Box::new(cmd_layers)),
-        ("assets", Box::new(|| assets::run(&root()))),
-        ("wasm", Box::new(cmd_wasm)),
+        ("test", Box::new(|| test(&["test", "--workspace"], "test"))),
     ];
-    let mut done = Vec::new();
+    if hardware {
+        steps.push((
+            "gpu-backends",
+            Box::new(|| {
+                // the GPU tests once per backend with a hardware adapter (`LIGHTCRAFT_GPU_BACKEND`)
+                probe();
+                let backends = ci_report::hardware_backends(&gpu.borrow());
+                if backends.is_empty() {
+                    eprintln!("no hardware GPU adapter on any backend: nothing to run");
+                }
+                let mut failed = Vec::new();
+                for (backend, adapter) in backends {
+                    let step = format!("gpu-{backend}");
+                    let mut c = cargo();
+                    c.args(["test", "-p", "lightcraft-gpu", "--features", "denoise"])
+                        .env("LIGHTCRAFT_GPU_BACKEND", &backend)
+                        .env(ci_report::SKIP_LOG_ENV, ci_report::skip_log(&root, &step));
+                    let t = std::time::Instant::now();
+                    let ok = run(c, &format!("LIGHTCRAFT_GPU_BACKEND={backend} cargo test -p lightcraft-gpu --features denoise")).is_ok();
+                    hardware_runs.borrow_mut().push(serde_json::json!({
+                        "backend": backend,
+                        "adapter": adapter,
+                        "status": if ok { "ok" } else { "fail" },
+                        "seconds": t.elapsed().as_secs_f64(),
+                    }));
+                    if !ok {
+                        failed.push(backend);
+                    }
+                }
+                if failed.is_empty() { Ok(()) } else { Err(format!("the GPU tests failed on {}", failed.join(", "))) }
+            }),
+        ));
+    }
+    steps.push(("parity", Box::new(|| parity::run(&root, false))));
+    steps.push(("layers", Box::new(cmd_layers)));
+    steps.push(("assets", Box::new(|| assets::run(&root))));
+    steps.push(("wasm", Box::new(cmd_wasm)));
+
+    let mut results = Vec::new();
+    let mut failure = None;
     for (name, f) in &steps {
         eprintln!("\n=== ci: {name} ===");
-        if let Err(e) = f() {
+        let t = std::time::Instant::now();
+        let r = f();
+        let status = if r.is_ok() { "ok" } else { "fail" };
+        results.push(serde_json::json!({"name": name, "status": status, "seconds": t.elapsed().as_secs_f64()}));
+        if *name == "test" {
+            // right after the workspace tests, before parity and wasm build other feature sets
+            probe();
+        }
+        if let Err(e) = r {
+            failure = Some((*name, e));
+            break;
+        }
+    }
+    if gpu.borrow().is_null() {
+        *gpu.borrow_mut() = serde_json::json!({"error": "not probed: the test step did not run"});
+    }
+    let done: Vec<&str> = steps.iter().take(results.len()).map(|(n, _)| *n).collect();
+    match &failure {
+        Some((name, e)) => {
             println!("\nCI summary:");
-            for d in &done {
+            for d in done.iter().filter(|d| *d != name) {
                 println!("  ok    {d}");
             }
             println!("  FAIL  {name}: {e}");
-            for (n, _) in steps.iter().skip(done.len() + 1) {
+            for (n, _) in steps.iter().skip(results.len()) {
                 println!("  skip  {n}");
             }
-            return Err(format!("ci failed at `{name}`"));
         }
-        done.push(*name);
+        None => println!("\nCI summary: all {} steps passed ({})", done.len(), done.join(", ")),
     }
-    println!("\nCI summary: all {} steps passed ({})", done.len(), done.join(", "));
-    Ok(())
+    for (n, _) in steps.iter().skip(results.len()) {
+        results.push(serde_json::json!({"name": n, "status": "not run"}));
+    }
+
+    let skips = ci_report::read_skips(&report_dir, &root);
+    let ram_mb = available_ram_mb();
+    let report = serde_json::json!({
+        "schema": ci_report::SCHEMA,
+        "command": std::iter::once("cargo xtask ci").chain(args.iter().copied()).collect::<Vec<_>>().join(" "),
+        "result": if failure.is_some() { "fail" } else { "pass" },
+        "failed_step": failure.as_ref().map(|(n, _)| *n),
+        "started_unix": started_unix,
+        "seconds": started.elapsed().as_secs_f64(),
+        "git": ci_report::git(&root),
+        "machine": ci_report::machine(total_ram_gb(), ram_mb),
+        "toolchain": ci_report::toolchain(),
+        "capabilities": {"gpu": gpu.take(), "data": ci_report::data(&root, &RAW_SAMPLES.iter().map(|s| s.0).collect::<Vec<_>>())},
+        "steps": results,
+        "hardware": hardware_runs.take(),
+        "skips": ci_report::skips_json(&skips),
+    });
+    print!("{}", ci_report::summary_text(&report));
+    let md = ci_report::summary_md(&report);
+    let written = serde_json::to_string_pretty(&report)
+        .map_err(|e| e.to_string())
+        .and_then(|json| std::fs::write(report_dir.join("report.json"), json + "\n").map_err(|e| e.to_string()))
+        .and_then(|()| std::fs::write(report_dir.join("summary.md"), &md).map_err(|e| e.to_string()));
+    match written {
+        Ok(()) => println!("Report: target/ci/report.json; to paste into a PR: target/ci/summary.md (or run with --summary-md)"),
+        Err(e) => eprintln!("ci: could not write the report to {}: {e}", report_dir.display()),
+    }
+    if print_md {
+        println!("\n{md}");
+    }
+    match failure {
+        Some((name, _)) => Err(format!("ci failed at `{name}`")),
+        None => Ok(()),
+    }
+}
+
+/// Run the ignored `gpu_probe` test of lightcraft-gpu: the pipeline's device (`None`) or one
+/// backend's adapters. `--workspace`, like the test step, so its build is reused. Its stdout, or why
+/// it failed (a driver that crashes while it is enumerated, issue #136, ends up here, not in xtask).
+fn probe_gpu(backend: Option<&str>) -> Result<String, String> {
+    let mut c = cargo();
+    c.args(["test", "-q", "--workspace", "--test", "gpu_probe", "--", "--ignored", "--exact", "gpu_probe", "--nocapture"]);
+    c.env("LIGHTCRAFT_GPU_PROBE", backend.unwrap_or(""));
+    let out = c.output().map_err(|e| format!("gpu_probe: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let tail: Vec<&str> = err.lines().rev().filter(|l| !l.trim().is_empty()).take(3).collect();
+        return Err(format!(
+            "gpu_probe {}exited with {}: {}",
+            backend.map(|b| format!("{b} ")).unwrap_or_default(),
+            out.status,
+            tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// CC0 raw samples (raw.pixls.us). Small, representative set; extend freely (CC0 only).
@@ -333,6 +465,207 @@ fn cmd_ci() -> Result<(), String> {
 /// The third field is the SHA-256 of the file as downloaded; `cargo xtask corpus --download` checks it.
 /// One per format / compression variant we decode or deliberately report as unsupported (preview only).
 const RAW_SAMPLES: &[(&str, &str, &str)] = &[
+    // Camera-coverage sweep: CC0 files, sensor hashes and comparisons in docs/raw/coverage-sweep.tsv.
+    (
+        "coverage-915.dng",
+        "https://raw.pixls.us/getfile.php/915/nice/Apple%20-%20iPhone%206s%20Plus%20-%2016bit%20%284:3%29.DNG",
+        "845fee4f09c832af3728778737f5ae9b99124debb821b6e2066b94aed1daa91c",
+    ),
+    (
+        "coverage-939.dng",
+        "https://raw.pixls.us/getfile.php/939/nice/Apple%20-%20iPhone%207%20Plus%20-%2016bit%20%284:3%29.DNG",
+        "e8c7ebd8f22f7281d165496b91c8fea8a8e79c8113172fb499e1d66d6045332e",
+    ),
+    (
+        "coverage-3372.dng",
+        "https://raw.pixls.us/getfile.php/3372/nice/Apple%20-%20iPhone%20XS%20-%2016bit%20%284:3%29.dng",
+        "50bc64ee8cfbbfb6c0531e29ab428ff985506a16fe2d1d2e74656f21b54505f6",
+    ),
+    (
+        "coverage-3009.dng",
+        "https://raw.pixls.us/getfile.php/3009/nice/Hasselblad%20-%20L1D-20c%20-%2016bit%20%283:2%29.DNG",
+        "7afecae0db80d832941eeeb3c0eb2dc03f5696637b6e78b3c592e8c002dce4ec",
+    ),
+    (
+        "coverage-5140.dng",
+        "https://raw.pixls.us/getfile.php/5140/nice/Hasselblad%20-%20L2D-20c%20-%2016bit%20%284:3%29.DNG",
+        "dbe98cb202f884ff11e0144899613b26d33cf9cddd9f1a62226f4352397f18e4",
+    ),
+    (
+        "coverage-8041.dng",
+        "https://raw.pixls.us/getfile.php/8041/nice/DJI%20-%20FC9287%20-%2016bit%20%2816:9%29.DNG",
+        "901b7970f02f7197c782f111363feef02108f75811342d8cc4a2b66757bb7af0",
+    ),
+    (
+        "coverage-4785.dng",
+        "https://raw.pixls.us/getfile.php/4785/nice/DJI%20-%20FC7303%20-%2016bit%20%284:3%29.DNG",
+        "21a49e63966f82391ca1188c7559c3acc01a35a89a70194fda4bf44cbd64a851",
+    ),
+    (
+        "coverage-4898.dng",
+        "https://raw.pixls.us/getfile.php/4898/nice/DJI%20-%20FC7303%20-%2016bit%20%2816:9%29.DNG",
+        "fb4f294e12cab7b507fd0b7c07f24e5d13e7c0dd127b534ce12c48d644c9363d",
+    ),
+    (
+        "coverage-3502.dng",
+        "https://raw.pixls.us/getfile.php/3502/nice/Google%20-%20Pixel%204%20XL%20-%2016bit%20%284:3%29.dng",
+        "0c03a6c93b4b8593cd0e4426166e6389710007238b82eb23861ef191322f0c54",
+    ),
+    (
+        "coverage-4176.dng",
+        "https://raw.pixls.us/getfile.php/4176/nice/Google%20-%20Pixel%204a%20-%2016bit%20%284:3%29.dng",
+        "11b38186ee3455376291bcdb3049728a3f9dcd94b9e82ff76855d9f3430e44be",
+    ),
+    (
+        "coverage-5961.dng",
+        "https://raw.pixls.us/getfile.php/5961/nice/Google%20-%20Pixel%206%20Pro%20-%2016bit%20%284:3%29.dng",
+        "3a859e917a91698a3e15ce3b3721a48a1fb1296873e0697d3bf7c2793297200d",
+    ),
+    (
+        "coverage-7751.dng",
+        "https://raw.pixls.us/getfile.php/7751/nice/Google%20-%20Pixel%208%20Pro%20-%2016bit%20%284:3%29.dng",
+        "45420c595401547cca950ae58d552bc82b32d31ce1d58c082df33004016197f5",
+    ),
+    (
+        "coverage-7217.3fr",
+        "https://raw.pixls.us/getfile.php/7217/nice/Hasselblad%20-%20CFV-50c%20-%2016bit%20%284:3%29.3FR",
+        "e27ff177519298fe7bae64506b975190789dc0e6ad70bea58be7c78fd094eae0",
+    ),
+    (
+        "coverage-7218.fff",
+        "https://raw.pixls.us/getfile.php/7218/nice/Hasselblad%20-%20CFV-50c%20-%2016bit%20%284:3%29.fff",
+        "c8d78912ae725a59acff42a4b4731350bbddd4a600423f319579261bd41da932",
+    ),
+    (
+        "coverage-1640.fff",
+        "https://raw.pixls.us/getfile.php/1640/nice/Hasselblad%20-%20H5D-40%20-%2016bit%20%284:3%29.fff",
+        "209d464e13702de5f4fdb830ac26ac140c98a8d0dc3e81c5ba61d93677330832",
+    ),
+    (
+        "coverage-1639.fff",
+        "https://raw.pixls.us/getfile.php/1639/nice/Hasselblad%20-%20H5D-50c%20-%2016bit%20%284:3%29.fff",
+        "1aad9319fcbab81b851a74c3eeaa2a07fc5013bf2c4e272fd31d6419b6b9adb0",
+    ),
+    (
+        "coverage-2058.3fr",
+        "https://raw.pixls.us/getfile.php/2058/nice/Hasselblad%20-%20X1D%20-%2016bit%20%284:3%29.3FR",
+        "395acb2c706dc10270c58ec261e42a5e36f6ac8c39d2a767e86e83648aa318a3",
+    ),
+    (
+        "coverage-3874.fff",
+        "https://raw.pixls.us/getfile.php/3874/nice/Hasselblad%20-%20X1D%20II%2050C%20-%2016bit%20%284:3%29.fff",
+        "8c2451b3478fb529b4e9bd51ed3267999ce26eb1fcb5c3b93c3ae7bc56267794",
+    ),
+    (
+        "coverage-3941.3fr",
+        "https://raw.pixls.us/getfile.php/3941/nice/Hasselblad%20-%20X1D%20II%2050C%20-%2016bit%20%284:3%29.3FR",
+        "809d498263d6f07cbaa4b9a5be97933057b4ab21e7243bb7afbe3862f3b48b47",
+    ),
+    (
+        "coverage-6568.fff",
+        "https://raw.pixls.us/getfile.php/6568/nice/Hasselblad%20-%20X2D%20100C%20-%2016bit%20%284:3%29.fff",
+        "44977fdaa3063eacbb2ac416dfb531bb4e3b96f3745d073dc49fb1ebcd78bedc",
+    ),
+    (
+        "coverage-6565.3fr",
+        "https://raw.pixls.us/getfile.php/6565/nice/Hasselblad%20-%20X2D%20100C%20-%2016bit%20%284:3%29.3FR",
+        "dcc5a4abe3498e6f25e89bb491995fd12c3b669d9277c71b45b49210d3e56280",
+    ),
+    (
+        "coverage-4726.nef",
+        "https://raw.pixls.us/getfile.php/4726/nice/Nikon%20-%20D6%20-%2012bit%2012bit%20compressed%20%28Lossy%20%28type%202%29%29%20%283:2%29.NEF",
+        "3a098e704d0e1af97efc37541b43a37e5b3457d2f4e7828c0d8d9af37332f233",
+    ),
+    (
+        "coverage-4720.nef",
+        "https://raw.pixls.us/getfile.php/4720/nice/Nikon%20-%20D6%20-%2014bit%2014bit%20compressed%20%28Lossless%29%20%283:2%29.NEF",
+        "827bcfff8a3cd86278382c353e4542faab52cf12c365540f30753bb4c6fabc0f",
+    ),
+    (
+        "coverage-4721.nef",
+        "https://raw.pixls.us/getfile.php/4721/nice/Nikon%20-%20D6%20-%2014bit%2014bit%20compressed%20%28Lossy%20%28type%202%29%29%20%283:2%29.NEF",
+        "081d5dbc1d6c97935020d33ffa486dcaa8d4564cbde280cfadcf26ff61da2838",
+    ),
+    (
+        "coverage-3584.nef",
+        "https://raw.pixls.us/getfile.php/3584/nice/Nikon%20-%20Z%206%20-%2012bit%2012bit%20compressed%20%283:2%29.NEF",
+        "3cbd9acf9e9bfd7d0c62c46436109556a101f7535c5fd25f86dad6ea61bf3886",
+    ),
+    (
+        "coverage-3581.nef",
+        "https://raw.pixls.us/getfile.php/3581/nice/Nikon%20-%20Z%206%20-%2014bit%2014bit%20compressed%20%283:2%29.NEF",
+        "8ca94584578b35a422744c1a610174ce37df0691588edfdecaec3111b3fbbb02",
+    ),
+    (
+        "coverage-3582.nef",
+        "https://raw.pixls.us/getfile.php/3582/nice/Nikon%20-%20Z%206%20-%2014bit%2014bit%20lossless%20compressed%20%283:2%29.NEF",
+        "c079345fc93f53a4f0d322f8ddaae505f920c36015f25b58befccaa61db1af31",
+    ),
+    (
+        "coverage-2792.nef",
+        "https://raw.pixls.us/getfile.php/2792/nice/Nikon%20-%20Z%207%20-%2012bit%2012bit%20compressed%20%283:2%29.NEF",
+        "c861546fbcf5826d5eb26d223e2143fa32968e89f7edbc5bb10c283ea5461ded",
+    ),
+    (
+        "coverage-2789.nef",
+        "https://raw.pixls.us/getfile.php/2789/nice/Nikon%20-%20Z%207%20-%2012bit%2012bit%20compressed%20%283:2%29.NEF",
+        "e54a6c4264bf685214f538036fd9d39088e510b2bfedf288e568f0db1897880e",
+    ),
+    (
+        "coverage-2790.nef",
+        "https://raw.pixls.us/getfile.php/2790/nice/Nikon%20-%20Z%207%20-%2012bit%2012bit%20compressed%20%283:2%29.NEF",
+        "f0e756dbfd00f3b71cb3d8aa5b9e2e1be32f1052a6c4380e09ebc7c5e7748114",
+    ),
+    (
+        "coverage-6617.nef",
+        "https://raw.pixls.us/getfile.php/6617/nice/Nikon%20-%20Z%208%20-%208bit%208bit%20compressed%20%283:2%29.NEF",
+        "c13a8675294456b9c979e6c1e556951654f35377b2870af2874bfb556f21ce40",
+    ),
+    (
+        "coverage-2912.dng",
+        "https://raw.pixls.us/getfile.php/2912/nice/Parrot%20-%20Anafi%20-%2016bit%20%284:3%29.DNG",
+        "a257a296047ff2d396109fd2e6947fa36aa7986695b6815f83979d59e98a84e6",
+    ),
+    (
+        "coverage-6728.dng",
+        "https://raw.pixls.us/getfile.php/6728/nice/Samsung%20-%20Galaxy%20S21%20Ultra%20-%204:3.dng",
+        "5baeb5f0c4a125647df03b82c2d38b0f02784393bd39eff1a5b23d8f5308dc5e",
+    ),
+    (
+        "coverage-6261.dng",
+        "https://raw.pixls.us/getfile.php/6261/nice/Samsung%20-%20Galaxy%20S22%20Ulra%20-%204:3.dng",
+        "53e7f83a94c965495ba32d3ea6021ef08ed02244ce64d111d1329bbd01fd5581",
+    ),
+    (
+        "coverage-6697.dng",
+        "https://raw.pixls.us/getfile.php/6697/nice/Samsung%20-%20Galaxy%20S23%20-%204:3.dng",
+        "1c04574f32b5a139922f075291c52018b89d9981ee155a16958a231c1fdbb067",
+    ),
+    (
+        "coverage-1297.dng",
+        "https://raw.pixls.us/getfile.php/1297/nice/Samsung%20-%20G935F%20-%2016bit%20%2816:9%29.dng",
+        "843617c8b572320b7badfb4ac2eda19479f5804a1dabb909c861bde23ed30561",
+    ),
+    (
+        "coverage-2645.dng",
+        "https://raw.pixls.us/getfile.php/2645/nice/Samsung%20-%20SM-G950F%20-%2016bit%20%284:3%29.dng",
+        "6abdd353094964eaadddf69bba3a0d551ecce1bc0ed013a434691df4f64dcbf2",
+    ),
+    (
+        "coverage-2310.dng",
+        "https://raw.pixls.us/getfile.php/2310/nice/Samsung%20-%20SM-G955F%20-%2016bit%20%284:3%29.dng",
+        "3cf5da4331d062bc6b31e0e8f5b7ff2cd21107de4262d79a2667f670516e8e8c",
+    ),
+    (
+        "coverage-7273.dng",
+        "https://raw.pixls.us/getfile.php/7273/nice/Sigma%20-%20fp%20-%2014bit%20%283:2%29.DNG",
+        "0844bcf23a49e21b5c2f8489de55ce38fb7b594e3ed337d6b9af2dd9341354e9",
+    ),
+    (
+        "coverage-6949.dng",
+        "https://raw.pixls.us/getfile.php/6949/nice/Sigma%20-%20fp%20L%20-%2014bit%20%283:2%29.DNG",
+        "8e7229f28be30bfa45289940eac04194af2b3474f6db286e4fa4070c145a0a70",
+    ),
     (
         "arw-sony-a7rm4a-compressed.arw",
         "https://raw.pixls.us/getfile.php/4822/nice/Sony%20-%20ILCE-7RM4A%20-%2014bit%2014bit%20compressed%20%283:2%29.ARW",
@@ -785,6 +1118,18 @@ const RAW_SAMPLES: &[(&str, &str, &str)] = &[
         "83c82be0be8865d796096dfbcc8ef2abf5af1bd37db44dfad6715070b0c99d15",
     ),
     (
+        // Z 6II, NIKKOR Z 24-200 at 70 mm, Vivid picture control (not used to fit the bundled Z 6II profile)
+        "nef-nikon-z6ii-lossless.nef",
+        "https://raw.pixls.us/getfile.php/4160/nice/Nikon%20-%20Z%206_2%20-%2014bit%20compressed%20(Lossless)%20(3:2).NEF",
+        "1b67d15817dbd4143a1f1089e2f09e319a2a2327c124e2643284509dd7621030",
+    ),
+    (
+        // Z 8, NIKKOR Z 14-24 f/2.8 S (not used to fit the bundled Z 8 profile)
+        "nef-nikon-z8-lossless.nef",
+        "https://raw.pixls.us/data/Nikon/Z%208/Nikon_Z8_raw_14_bit_lossless_compression.NEF",
+        "c13a8675294456b9c979e6c1e556951654f35377b2870af2874bfb556f21ce40",
+    ),
+    (
         "nrw-nikon-b700-uncompressed.nrw",
         "https://raw.pixls.us/getfile.php/1621/nice/Nikon%20-%20COOLPIX%20B700%20-%2012bit%2012bit%20uncompressed%20%284:3%29.NRW",
         "a175d5892304e79282add07eacf4bdc498ca3f050af48cf989c080355b4735ec",
@@ -1042,6 +1387,26 @@ const RAW_SAMPLES: &[(&str, &str, &str)] = &[
         "rwl-leica-dlux7.rwl",
         "https://raw.pixls.us/getfile.php/4204/nice/Leica%20-%20D-Lux%207%20-%204:3.RWL",
         "4f6db6492da83f7f2a5012591e370557249d1ed44d4c948784016605b799327c",
+    ),
+    (
+        "mrw-minolta-dimage7hi-words16.mrw",
+        "https://raw.pixls.us/data/Minolta/DiMAGE%207Hi/RAW_MINOLTA_DIMAGE_7HI.MRW",
+        "2919a05757197a5424e02970c016893bca5aa29363a67b62b1a4b36326a10f6a",
+    ),
+    (
+        "mrw-minolta-dimage-a1.mrw",
+        "https://raw.pixls.us/data/Minolta/DiMAGE%20A1/RAW_MINOLTA_A1.MRW",
+        "bde1e2cd788e49c9bef20dfdd41be948fb02c2ee198c6b0959a67a3f79fd41c9",
+    ),
+    (
+        "mrw-minolta-dimage-a200-gbrg.mrw",
+        "https://raw.pixls.us/data/Minolta/DiMAGE%20A200/RAW_MINOLTA_DIMAGE_A200.MRW",
+        "2a95f6af2168e536dfb6d02b47e3b6119b35b497eebf179d7c20a6e496c26641",
+    ),
+    (
+        "mrw-minolta-dynax7d.mrw",
+        "https://raw.pixls.us/data/Minolta/Dynax%207D/PICT3410.MRW",
+        "713819e33e5302ec864d576d57223cfc8dcf46e8d45e0ae744d1fec40290a89f",
     ),
     (
         "nef-nikon-d700.nef",

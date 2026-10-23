@@ -19,7 +19,7 @@ const MAX_LSB: u8 = 3;
 fn gpu() -> bool {
     let ok = lightcraft_gpu::available();
     if !ok {
-        eprintln!("skipped: no GPU adapter");
+        lightcraft_testkit::skip!(Gpu, "no GPU adapter");
     }
     ok
 }

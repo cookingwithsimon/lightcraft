@@ -538,8 +538,10 @@ pub fn write_rendered_dng(
         color,
         wb_multipliers: None,
         linearized: false,
+        pixel_aspect: 1.0,
         opcodes: crate::OpcodeLists::default(),
         metadata: metadata.clone(),
+        lens_metadata: Default::default(),
     };
     let order = ByteOrder::Little;
     write_dng(&raw, &DngWriteOptions { compression: DngCompression::Deflate { tile: 256, half: true }, order, xmp })
