@@ -1,0 +1,49 @@
+name: iPad build (unsigned, for sideloading)
+
+# Builds the native iPad app from PR #2950 (ios/) without code signing, as an
+# .ipa that Sideloadly or AltStore on Windows re-sign with a personal Apple ID.
+# Run it from the Actions tab; it builds the branch named below.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch holding the iPad port (ios/)
+        default: claude/project-thread-m0r575
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Rust for iOS
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ios -> target
+      - name: Build the app without signing
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          xcodebuild -project LightCraftiPad.xcodeproj -target LightCraftiPad \
+            -configuration Release -sdk iphoneos SYMROOT="$RUNNER_TEMP/build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            build
+      - name: Package .ipa
+        run: |
+          set -euo pipefail
+          app=$(find "$RUNNER_TEMP/build/Release-iphoneos" -maxdepth 1 -name '*.app' | head -1)
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$app" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/LightCraft-iPad-unsigned.ipa" Payload)
+          ls -lh "$GITHUB_WORKSPACE/LightCraft-iPad-unsigned.ipa"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LightCraft-iPad-unsigned
+          path: LightCraft-iPad-unsigned.ipa
+          retention-days: 30
