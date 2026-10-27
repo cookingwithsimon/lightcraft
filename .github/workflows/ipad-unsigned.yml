@@ -26,6 +26,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ios -> target
+      - name: Build the Rust library
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path lightcraft-ios/Cargo.toml --target aarch64-apple-ios --release
+          lib=$(find "$GITHUB_WORKSPACE" -path '*/aarch64-apple-ios/release/liblightcraft_ios.a' | head -1)
+          echo "Rust library: $lib"
+          test -n "$lib"
+          mkdir -p build
+          cp "$lib" build/liblightcraft_ios.a
       - name: Build the app without signing
         working-directory: ios
         run: |
